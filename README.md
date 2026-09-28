@@ -112,26 +112,54 @@ That's it. From now on, every `git commit` in that project is scanned automatica
 
 ## What happens on commit
 
-When you run `git commit`, the hook fires and you'll see output like this:
+Every commit triggers three things automatically — no terminal needed:
+
+### 1. Windows toast notification
+
+A native Windows notification appears in the corner of your screen:
+
+- **BypasserAI — Clean** → all files passed, nothing rewritten
+- **BypasserAI — Humanized** → one or more files were rewritten before commit
+
+Works in any IDE (Cursor, Kiro, Antigravity, OpenCode, Pi) without any extra setup. Uses BurntToast if installed, falls back to a Windows balloon notification otherwise.
+
+### 2. `.bypasser.log` file
+
+A log file is created automatically in your project root and updated after every commit:
 
 ```
-bypasser-ai: 3 file(s) scanned, 1 rewritten and re-staged
+# bypasser-ai — commit scan log
+
+── 2026-09-28 14:32:11 ─────────────────────────────────────
+  src/utils.ts: 72% [███████░░░] ✓ humanized & re-staged
+    ↳ [naming] Over-descriptive variable names (processData, handleResult)
+    ↳ [comments] Comments describe what the code does (obvious narration)
+  src/index.ts: 31% [███░░░░░░░] ✓ ok
+  → 1 file(s) humanized and re-staged
+
+── 2026-09-28 15:10:44 ─────────────────────────────────────
+  src/api.py: 18% [██░░░░░░░░] ✓ ok
 ```
 
-Or with `--verbose` enabled in the hook:
+Open it once in your IDE and leave it as a tab — it updates automatically after each commit.
+
+> `.bypasser.log` is automatically added to `.gitignore` and never committed.
+
+### 3. Terminal output (when running manually)
+
+If you run `bypasser audit --verbose` directly:
 
 ```
-[src/utils.ts] score: 72% ⚠ ABOVE THRESHOLD
+[src/utils.ts] score: 72%
   ✗ [naming] Over-descriptive variable names (processData, handleResult)
   ✗ [comments] Comments describe what the code does (obvious narration)
-  ✗ [error-handling] Every catch block has custom error class or full logging
 
-[src/index.ts] score: 31% ✓ ok
+bypasser-ai — 2 file(s) scanned
+  src/utils.ts: 72% [███████░░░] ✓ humanized & re-staged
+  src/index.ts: 31% [███░░░░░░░] ✓ ok
 
-bypasser-ai: 2 file(s) scanned, 1 rewritten and re-staged
+  → 1 file(s) rewritten. Commit will use humanized version.
 ```
-
-The rewritten file is automatically re-staged. The commit proceeds with the humanized version.
 
 ---
 
@@ -249,10 +277,12 @@ src/
   cli.ts        Entry point, command router
   config.ts     Config loader (.bypasser.json + env vars)
   detector.ts   Deterministic AI-pattern scorer (no API)
-  rewriter.ts   OpenAI-compatible API client + humanizer prompt
+  rewriter.ts   OpenAI-compatible API client + humanizer prompt + response sanitizer
   git.ts        Staged diff reader + file restager
   installer.ts  Pre-commit hook writer/remover
-  audit.ts      Full pipeline: detect → rewrite → restage
+  audit.ts      Full pipeline: detect → rewrite → restage → log → notify
+  logger.ts     Appends timestamped results to .bypasser.log
+  notifier.ts   Windows toast notifications (BurntToast or balloon fallback)
   index.ts      Public library exports
 docs/
   SKILL.md      Humanizer skill prompt (loaded at runtime by rewriter.ts)
