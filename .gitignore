@@ -25,3 +25,6 @@ npm-debug.log*
 
 # TypeScript cache
 *.tsbuildinfo
+
+# Varios
+session-analysis.md
