@@ -1,0 +1,41 @@
+{
+  "name": "bypasser-ai",
+  "version": "0.1.0",
+  "description": "Pre-commit hook that detects AI-generated code patterns and rewrites them via any OpenAI-compatible API.",
+  "type": "module",
+  "bin": {
+    "bypasser": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write src"
+  },
+  "files": [
+    "dist",
+    "docs/SKILL.md",
+    "assets/logo.png"
+  ],
+  "keywords": [
+    "ai-detection",
+    "humanizer",
+    "git-hook",
+    "pre-commit",
+    "code-style"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "openai": "^4.52.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
