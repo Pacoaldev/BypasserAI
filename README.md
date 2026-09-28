@@ -300,3 +300,9 @@ docs/
 - Never degrades correctness, security, or legibility to appear human
 - Not intended for academic plagiarism evasion — only for natural Git authorship style
 - The detector uses heuristics, not a full AST parser; false positives are possible on unusual codebases. Adjust `threshold` up if it fires too often
+
+---
+
+<a href="https://github.com/Gentleman-Programming/gentle-ai">
+  <img width="220" src="https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/docs/assets/brand/built-with-gentle-ai.png" alt="Built with Gentle-AI" />
+</a>
