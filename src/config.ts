@@ -13,6 +13,7 @@ export interface BypasserConfig {
   ignore: string[];
 }
 
+
 const DEFAULTS: BypasserConfig = {
   baseURL: "https://api.openai.com/v1",
   apiKey: "",
