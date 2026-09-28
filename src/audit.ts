@@ -1,14 +1,20 @@
-import { detectAI, extractAddedLines } from "./detector.js";
+import { detectAI, extractAddedLines, countChangedLines } from "./detector.js";
 import { rewriteFile } from "./rewriter.js";
 import { getStagedFiles, restageFile } from "./git.js";
-import { loadConfig } from "./config.js";
-import { writeLog } from "./logger.js";
+import { loadConfig, resolveThreshold } from "./config.js";
+import { matchGlob } from "./git.js";
+import {
+  writeLog,
+  loadRewriteState,
+  recordRewrite,
+} from "./logger.js";
 import { notifyWindows } from "./notifier.js";
 import type { DetectorResult } from "./detector.js";
 
 export interface FileAuditResult {
   path: string;
   score: number;
+  threshold: number;
   signals: DetectorResult["signals"];
   rewritten: boolean;
   skippedReason?: string;
@@ -48,15 +54,20 @@ export async function runAudit(opts: {
   }
 
   const staged = getStagedFiles(cwd, config);
+  const rewriteState = loadRewriteState(cwd);
   const results: FileAuditResult[] = [];
 
   for (const file of staged) {
     const added = extractAddedLines(file.diff);
+    const threshold = resolveThreshold(file.path, config, matchGlob);
 
-    if (added.trim().split("\n").length < 5) {
+    // Skip based on the *whole* change size (added + removed), not just the
+    // added lines — small edits to a large file are still worth scoring.
+    if (countChangedLines(file.diff) < 5) {
       results.push({
         path: file.path,
         score: 0,
+        threshold,
         signals: [],
         rewritten: false,
         skippedReason: "too few changed lines",
@@ -64,7 +75,7 @@ export async function runAudit(opts: {
       continue;
     }
 
-    const detection = detectAI(added);
+    const detection = detectAI(added, file.path);
 
     if (opts.verbose) {
       const fired = detection.signals.filter((s) => s.fired);
@@ -76,10 +87,11 @@ export async function runAudit(opts: {
       }
     }
 
-    if (detection.score < config.threshold) {
+    if (detection.score < threshold) {
       results.push({
         path: file.path,
         score: detection.score,
+        threshold,
         signals: detection.signals,
         rewritten: false,
       });
@@ -90,6 +102,7 @@ export async function runAudit(opts: {
       results.push({
         path: file.path,
         score: detection.score,
+        threshold,
         signals: detection.signals,
         rewritten: false,
         skippedReason: "dry-run mode",
@@ -98,13 +111,31 @@ export async function runAudit(opts: {
     }
 
     try {
-      const res = await rewriteFile(file.path, file.content, config);
+      const res = await rewriteFile(file.path, file.content, config, {
+        knownHash: rewriteState[file.path],
+      });
+
+      if (res.skipped) {
+        results.push({
+          path: file.path,
+          score: detection.score,
+          threshold,
+          signals: detection.signals,
+          rewritten: false,
+          skippedReason: "already humanized (unchanged)",
+        });
+        continue;
+      }
+
       if (res.changed) {
         restageFile(file.path, res.rewritten, cwd);
+        if (res.hash) recordRewrite(cwd, file.path, res.hash);
       }
+
       results.push({
         path: file.path,
         score: detection.score,
+        threshold,
         signals: detection.signals,
         rewritten: res.changed,
       });
@@ -113,6 +144,7 @@ export async function runAudit(opts: {
       results.push({
         path: file.path,
         score: detection.score,
+        threshold,
         signals: detection.signals,
         rewritten: false,
         skippedReason: "rewrite error",
@@ -163,7 +195,7 @@ function _writeLogAndNotify(cwd: string, result: AuditResult): void {
   // write to .bypasser.log
   writeLog(cwd, logLines);
 
-  // Windows toast
+  // Windows toast — fire-and-forget, never blocks the commit
   if (result.rewrittenFiles > 0) {
     notifyWindows({
       title: "BypasserAI — Humanized",

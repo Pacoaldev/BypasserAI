@@ -23,9 +23,13 @@ Thumbs.db
 *.log
 npm-debug.log*
 .bypasser.log
+.bypasser.state.json
 
 # TypeScript cache
 *.tsbuildinfo
+
+# Local tooling caches
+.atl/
 
 # Varios
 session-analysis.md

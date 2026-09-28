@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { spawn } from "child_process";
 
 export interface NotifyOptions {
   title: string;
@@ -7,59 +7,96 @@ export interface NotifyOptions {
   type?: "info" | "warning" | "error";
 }
 
+export interface NotifyDeps {
+  /** Platform to target; injectable for tests. Defaults to process.platform. */
+  platform?: NodeJS.Platform;
+  /** Spawn function, injectable for tests. Defaults to child_process.spawn. */
+  spawnFn?: typeof spawn;
+}
+
+// Cache whether BurntToast is available so we don't pay a PowerShell cold
+// start on *every* commit. `undefined` = not probed yet.
+let burntToastAvailable: boolean | undefined;
+
 /**
- * Fire a Windows toast notification.
+ * Fire a Windows toast notification, non-blocking.
  *
- * Strategy:
- * 1. Try BurntToast (PowerShell module) — rich toast with icon
- * 2. Fall back to a simple balloon via Win32 Shell COM object — no extra deps
- * 3. If both fail, silently do nothing — never block the commit
+ * The commit must never wait on a UI toast, so this spawns a detached
+ * PowerShell process and returns immediately. Tries BurntToast first (probed
+ * once, cached), then falls back to a Shell balloon.
  */
-export function notifyWindows(opts: NotifyOptions): void {
+export function notifyWindows(opts: NotifyOptions, deps: NotifyDeps = {}): void {
+  const platform = deps.platform ?? process.platform;
+  const spawnFn = deps.spawnFn ?? spawn;
+
+  // Notifications are a Windows nicety — no-op elsewhere.
+  if (platform !== "win32") return;
+
   const { title, message, type = "info" } = opts;
+  const icon =
+    type === "error" ? "Error" : type === "warning" ? "Warning" : "Information";
 
-  // sanitize: remove single quotes to avoid PS injection
-  const safeTitle = title.replace(/'/g, "");
-  const safeMsg = message.replace(/'/g, "");
-
-  // BurntToast icon mapping
-  const btIcon = type === "error" ? "Error" : type === "warning" ? "Warning" : "Information";
-
-  const burntToast = `
-    if (Get-Module -ListAvailable -Name BurntToast) {
-      Import-Module BurntToast -ErrorAction SilentlyContinue
-      New-BurntToastNotification -Text '${safeTitle}', '${safeMsg}' -AppLogo $null
-    } else { exit 1 }
-  `.trim();
-
-  // Fallback: balloon notification via Shell COM (works on all Windows without extra modules)
-  const balloon = `
-    Add-Type -AssemblyName System.Windows.Forms
-    $n = New-Object System.Windows.Forms.NotifyIcon
-    $n.Icon = [System.Drawing.SystemIcons]::${btIcon}
-    $n.BalloonTipTitle = '${safeTitle}'
-    $n.BalloonTipText = '${safeMsg}'
-    $n.BalloonTipIcon = '${btIcon}'
-    $n.Visible = $true
-    $n.ShowBalloonTip(6000)
-    Start-Sleep -Milliseconds 6500
-    $n.Dispose()
-  `.trim();
+  const script = buildScript(icon);
 
   try {
-    execSync(`powershell -NoProfile -NonInteractive -Command "${burntToast}"`, {
-      timeout: 5000,
-      stdio: "ignore",
-    });
-  } catch {
-    // BurntToast not available or failed — try balloon fallback
-    try {
-      execSync(`powershell -NoProfile -NonInteractive -Command "${balloon}"`, {
-        timeout: 8000,
+    const child = spawnFn(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      {
+        // Pass payload via env — no string interpolation, no injection surface.
+        env: { ...process.env, BYPASSER_TOAST_TITLE: title, BYPASSER_TOAST_MSG: message },
         stdio: "ignore",
-      });
-    } catch {
-      // both failed — silent, never block the commit
-    }
+        detached: true,
+        windowsHide: true,
+      }
+    );
+    child.unref();
+  } catch {
+    // never block the commit because of a notification
   }
+}
+
+/**
+ * Build the PowerShell script. Values are read from env vars, never inlined,
+ * so quotes/`$`/backticks in the title or message cannot break out.
+ * When BurntToast is unavailable (cached probe), the script itself exits so
+ * the caller does not need a second cold start.
+ */
+export function buildScript(icon: string): string {
+  const useBurntToast = burntToastAvailable !== false;
+  const probe = useBurntToast
+    ? "if (-not (Get-Module -ListAvailable -Name BurntToast)) { exit 3 }"
+    : "";
+
+  return `
+$ErrorActionPreference = 'Stop'
+$title = $env:BYPASSER_TOAST_TITLE
+$msg = $env:BYPASSER_TOAST_MSG
+${probe}
+if (Get-Module -ListAvailable -Name BurntToast) {
+  Import-Module BurntToast -ErrorAction SilentlyContinue
+  New-BurntToastNotification -Text $title, $msg | Out-Null
+} else {
+  Add-Type -AssemblyName System.Windows.Forms
+  $n = New-Object System.Windows.Forms.NotifyIcon
+  $n.Icon = [System.Drawing.SystemIcons]::${icon}
+  $n.BalloonTipTitle = $title
+  $n.BalloonTipText = $msg
+  $n.BalloonTipIcon = '${icon}'
+  $n.Visible = $true
+  $n.ShowBalloonTip(6000)
+  Start-Sleep -Milliseconds 6500
+  $n.Dispose()
+}
+`.trim();
+}
+
+/** Reset the cached BurntToast probe — test-only. */
+export function _resetBurntToastCache(): void {
+  burntToastAvailable = undefined;
+}
+
+/** Record the cached BurntToast probe result — test-only. */
+export function _setBurntToastAvailable(value: boolean): void {
+  burntToastAvailable = value;
 }

@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { readFileSync, existsSync } from "fs";
+import { createHash } from "crypto";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import type { BypasserConfig } from "./config.js";
@@ -98,16 +99,42 @@ export interface RewriteResult {
   rewritten: string;
   changed: boolean;
   sanitizerWarning?: boolean;
+  /** True when the content hash matched a previous successful rewrite. */
+  skipped?: boolean;
+  /** Content hash, exposed so callers can persist it. */
+  hash?: string;
+}
+
+/** Stable content hash used to skip re-rewriting identical content. */
+export function contentHash(content: string): string {
+  return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
 export async function rewriteFile(
   filePath: string,
   content: string,
-  config: BypasserConfig
+  config: BypasserConfig,
+  options: {
+    /** If this hash equals the content hash, skip the API call entirely. */
+    knownHash?: string;
+    /** Per-request timeout in ms. Default 60000. */
+    timeout?: number;
+    /** Retries for transient API errors (429/5xx). Default 2. */
+    maxRetries?: number;
+  } = {}
 ): Promise<RewriteResult> {
+  const hash = contentHash(content);
+
+  // Already humanized this exact content before — don't pay for it twice.
+  if (options.knownHash && options.knownHash === hash) {
+    return { rewritten: content, changed: false, skipped: true, hash };
+  }
+
   const client = new OpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseURL,
+    timeout: options.timeout ?? 60000,
+    maxRetries: options.maxRetries ?? 2,
   });
 
   const userMessage = `File: ${filePath}\n\n${content}`;
@@ -119,12 +146,19 @@ export async function rewriteFile(
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userMessage },
     ],
-    temperature: 0.4, // low enough to be consistent, high enough to vary
+    temperature: config.temperature,
   });
 
   const raw = response.choices[0]?.message?.content ?? content;
   const { content: rewritten, wasInvalid } = sanitizeResponse(raw, content, filePath);
   const changed = rewritten.trim() !== content.trim();
 
-  return { rewritten, changed, sanitizerWarning: wasInvalid };
+  // Only remember the hash of a *successful, non-invalid* rewrite so a failed
+  // response is retried on the next commit.
+  return {
+    rewritten,
+    changed,
+    sanitizerWarning: wasInvalid,
+    hash: wasInvalid ? undefined : contentHash(rewritten),
+  };
 }

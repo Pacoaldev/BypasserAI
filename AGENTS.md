@@ -18,14 +18,27 @@ Apply `docs/SKILL.md` automatically whenever generating, editing, or refactoring
 
 ```
 src/cli.ts        → command router (init / install / detect / rewrite / audit)
-src/config.ts     → loads .bypasser.json and env vars
+src/config.ts     → loads .bypasser.json and env vars (+ per-glob thresholds, temperature)
 src/detector.ts   → deterministic AI-pattern scorer (no API, six signal families)
 src/rewriter.ts   → calls OpenAI-compatible API using docs/SKILL.md as system prompt
-src/git.ts        → reads staged diff, writes rewritten content back and re-stages
+src/git.ts        → reads staged diff via `git show :path`, writes rewritten content back and re-stages
 src/installer.ts  → writes/removes the pre-commit hook in .git/hooks/
 src/audit.ts      → full pipeline: detect → rewrite → restage
+src/logger.ts     → appends .bypasser.log + persists rewrite hashes in .bypasser.state.json
+src/notifier.ts   → Windows toast notifications (detached, non-blocking)
 src/index.ts      → public library exports
 docs/SKILL.md     → humanizer skill prompt loaded at runtime by src/rewriter.ts
+test/             → node:test suites (run with tsx)
+```
+
+## Commands
+
+```bash
+npm run build      # tsc → dist/
+npm run typecheck  # tsc over src + test (no emit)
+npm test           # tsx --test test/**/*.test.ts
+npm run lint       # eslint (flat config)
+npm run format     # prettier
 ```
 
 ---
@@ -87,7 +100,7 @@ When working on `src/detector.ts`, these are the six families and their intent:
 | `abstraction` | Immediate extraction of all repeated code, interface for every small type |
 | `uniformity` | Zero single-letter vars, every function block structurally identical |
 
-Each signal has a `weight` (0–1) and returns `fired: boolean`. The final score is `firedWeight / totalWeight`, clamped to [0, 1]. Files at or above `config.threshold` (default 0.65) are sent for rewriting.
+Each signal has a `weight` (0–1), a `test(code)` predicate, and an `isApplicable(ctx)` predicate. The final score is `firedWeight / applicableWeight` (normalised only over signals that can fire in the given context), clamped to [0, 1]. Files at or above the effective threshold (per-glob override via `config.thresholds`, else `config.threshold`, default 0.65) are sent for rewriting.
 
 ---
 
@@ -95,7 +108,7 @@ Each signal has a `weight` (0–1) and returns `fired: boolean`. The final score
 
 `src/rewriter.ts` loads `docs/SKILL.md` at runtime and injects it as the system prompt. The user message contains the file path and full content. The model returns the rewritten file content only — no markdown fences, no explanations.
 
-When editing `src/rewriter.ts`, preserve `temperature: 0.4` — low enough for consistency, high enough for variation.
+When editing `src/rewriter.ts`, the temperature comes from `config.temperature` (default `0.4`) — low enough for consistency, high enough for variation.
 
 ---
 

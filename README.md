@@ -91,7 +91,9 @@ This creates `.bypasser.json` in your project root:
   "model": "gpt-4o",
   "threshold": 0.65,
   "maxTokens": 4096,
-  "ignore": []
+  "temperature": 0.4,
+  "ignore": [],
+  "thresholds": []
 }
 ```
 
@@ -202,7 +204,9 @@ bypasser uninstall
 | `model` | `gpt-4o` | Model name for your provider |
 | `threshold` | `0.65` | Score (0–1) above which rewrite triggers |
 | `maxTokens` | `4096` | Max tokens for rewrite response |
+| `temperature` | `0.4` | Sampling temperature for the rewrite (higher = more variation) |
 | `ignore` | `[]` | Extra glob patterns to never rewrite |
+| `thresholds` | `[]` | Per-glob threshold overrides, e.g. `[{ "pattern": "src/legacy/**", "value": 0.3 }]` (first match wins) |
 
 ### Environment variables
 

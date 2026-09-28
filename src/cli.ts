@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { install, uninstall } from "./installer.js";
 import { runAudit } from "./audit.js";
-import { detectAI, extractAddedLines } from "./detector.js";
-import { getStagedFiles } from "./git.js";
-import { loadConfig } from "./config.js";
+import { detectAI, extractAddedLines, countChangedLines } from "./detector.js";
+import { getStagedFiles, matchGlob } from "./git.js";
+import { loadConfig, resolveThreshold } from "./config.js";
 import { writeFileSync } from "fs";
 import { resolve } from "path";
 
@@ -35,23 +35,24 @@ async function main() {
       let anyAbove = false;
       for (const file of staged) {
         const added = extractAddedLines(file.diff);
-        if (added.trim().split("\n").length < 5) {
+        const threshold = resolveThreshold(file.path, config, matchGlob);
+        if (countChangedLines(file.diff) < 5) {
           console.log(`${file.path}: skipped (too few changed lines)`);
           continue;
         }
-        const result = detectAI(added);
+        const result = detectAI(added, file.path);
         const pct = (result.score * 100).toFixed(0);
         const bar = scoreBar(result.score);
-        const label = result.score >= config.threshold ? "⚠ ABOVE THRESHOLD" : "✓ ok";
+        const label = result.score >= threshold ? "⚠ ABOVE THRESHOLD" : "✓ ok";
         console.log(`\n${file.path}: ${pct}% AI-score ${bar} ${label}`);
         const fired = result.signals.filter((s) => s.fired);
         if (fired.length > 0 && flags.has("--verbose")) {
           fired.forEach((s) => console.log(`  ✗ [${s.family}] ${s.description}`));
         }
-        if (result.score >= config.threshold) anyAbove = true;
+        if (result.score >= threshold) anyAbove = true;
       }
 
-      process.exit(anyAbove ? 1 : 0);
+      return anyAbove ? 1 : 0;
     }
 
     case "rewrite": {
@@ -94,7 +95,7 @@ async function main() {
           // always print something so the user knows the hook ran
           if (preCommit) console.log("bypasser-ai: nothing to scan.");
           else console.log("No eligible staged files.");
-          process.exit(0);
+          return 0;
         }
 
         // always print the per-file summary — visible in every IDE's commit output
@@ -125,11 +126,11 @@ async function main() {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`bypasser-ai error: ${msg}`);
-        // never block the commit on tool errors
+        // never block commit on tool errors
         process.exit(0);
       }
+      break;
     }
-
     case "init": {
       // create a default .bypasser.json in the project
       const defaultConfig = {
@@ -137,7 +138,9 @@ async function main() {
         model: "gpt-4o",
         threshold: 0.65,
         maxTokens: 4096,
+        temperature: 0.4,
         ignore: [],
+        thresholds: [],
       };
       const configPath = resolve(cwd, ".bypasser.json");
       writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + "\n", "utf8");
