@@ -33,9 +33,71 @@ Return ONLY the rewritten file content — no explanations, no markdown fences, 
 The output must be valid, compilable code in the same language as the input.
 If the code already looks human enough, return it UNCHANGED.`;
 
+// Prose signals that indicate the model responded as a chatbot instead of
+// returning raw code. We check the first few lines where preamble appears.
+const PROSE_SIGNALS = [
+  /^i notice\b/i,
+  /^i see\b/i,
+  /^here (are|is)\b/i,
+  /^let me\b/i,
+  /^sure[,!.]/i,
+  /^of course/i,
+  /^this (file|code|function|snippet)\b/i,
+  /^the (file|code|function|snippet)\b/i,
+  /^\d+\.\s+\*\*/,      // numbered markdown list like "1. **Remove the…"
+  /^-\s+\*\*/,           // bullet markdown like "- **Remove the…"
+];
+
+// Minimal set of tokens that must appear somewhere in a valid code response.
+const CODE_TOKENS = [
+  /\bimport\b/, /\bexport\b/, /\bfunction\b/, /\bconst\b/, /\blet\b/,
+  /\bvar\b/, /\bclass\b/, /\breturn\b/, /\bdef\b/, /\bfunc\b/,
+  /^#!/, /^package\s/, /^using\s/,
+];
+
+/**
+ * Strip markdown code fences and detect chatbot-style prose responses.
+ * Returns the sanitized content and a flag indicating whether the model
+ * produced an invalid (non-code) response so the caller can fall back.
+ */
+function sanitizeResponse(
+  raw: string,
+  original: string,
+  filePath: string
+): { content: string; wasInvalid: boolean } {
+  // 1. Strip leading/trailing markdown fences (```lang … ``` or ~~~ … ~~~)
+  const fenceRe = /^(?:```[\w]*|~~~[\w]*)\r?\n([\s\S]*?)(?:```|~~~)\s*$/;
+  const fenceMatch = raw.trim().match(fenceRe);
+  const stripped = fenceMatch ? fenceMatch[1] : raw;
+
+  // 2. Check the first 6 non-empty lines for prose signals
+  const firstLines = stripped
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  const hasProse = firstLines.some((line) =>
+    PROSE_SIGNALS.some((re) => re.test(line))
+  );
+
+  // 3. Verify the response contains at least one recognisable code token
+  const hasCode = CODE_TOKENS.some((re) => re.test(stripped));
+
+  if (hasProse || !hasCode) {
+    console.warn(
+      `[bypasser] ⚠ Model returned a non-code response for ${filePath} — keeping original.`
+    );
+    return { content: original, wasInvalid: true };
+  }
+
+  return { content: stripped, wasInvalid: false };
+}
+
 export interface RewriteResult {
   rewritten: string;
   changed: boolean;
+  sanitizerWarning?: boolean;
 }
 
 export async function rewriteFile(
@@ -60,8 +122,9 @@ export async function rewriteFile(
     temperature: 0.4, // low enough to be consistent, high enough to vary
   });
 
-  const rewritten = response.choices[0]?.message?.content ?? content;
+  const raw = response.choices[0]?.message?.content ?? content;
+  const { content: rewritten, wasInvalid } = sanitizeResponse(raw, content, filePath);
   const changed = rewritten.trim() !== content.trim();
 
-  return { rewritten, changed };
+  return { rewritten, changed, sanitizerWarning: wasInvalid };
 }
