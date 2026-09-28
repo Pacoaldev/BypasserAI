@@ -2,6 +2,8 @@ import { detectAI, extractAddedLines } from "./detector.js";
 import { rewriteFile } from "./rewriter.js";
 import { getStagedFiles, restageFile } from "./git.js";
 import { loadConfig } from "./config.js";
+import { writeLog } from "./logger.js";
+import { notifyWindows } from "./notifier.js";
 import type { DetectorResult } from "./detector.js";
 
 export interface FileAuditResult {
@@ -18,12 +20,18 @@ export interface AuditResult {
   rewrittenFiles: number;
 }
 
+function scoreBar(score: number): string {
+  const filled = Math.round(score * 10);
+  return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]";
+}
+
 /**
  * Full audit pipeline:
  * 1. Get staged files
  * 2. Score each with the detector
  * 3. Rewrite files above threshold via OpenAI-compatible API
  * 4. Re-stage rewritten files
+ * 5. Write .bypasser.log + fire Windows toast notification
  */
 export async function runAudit(opts: {
   cwd?: string;
@@ -45,7 +53,6 @@ export async function runAudit(opts: {
   for (const file of staged) {
     const added = extractAddedLines(file.diff);
 
-    // skip files with too few new lines to meaningfully score
     if (added.trim().split("\n").length < 5) {
       results.push({
         path: file.path,
@@ -79,7 +86,6 @@ export async function runAudit(opts: {
       continue;
     }
 
-    // score above threshold — rewrite
     if (opts.dryRun) {
       results.push({
         path: file.path,
@@ -103,7 +109,6 @@ export async function runAudit(opts: {
         rewritten: res.changed,
       });
     } catch (err) {
-      // rewrite failed — log and let the commit proceed untouched
       console.error(`[bypasser] rewrite failed for ${file.path}:`, err);
       results.push({
         path: file.path,
@@ -116,10 +121,60 @@ export async function runAudit(opts: {
   }
 
   const rewrittenFiles = results.filter((r) => r.rewritten).length;
+  const result: AuditResult = { files: results, totalFiles: results.length, rewrittenFiles };
 
-  return {
-    files: results,
-    totalFiles: results.length,
-    rewrittenFiles,
-  };
+  // --- Log + notify (non-blocking, always runs) ---
+  if (results.length > 0) {
+    _writeLogAndNotify(cwd, result);
+  }
+
+  return result;
+}
+
+function _writeLogAndNotify(cwd: string, result: AuditResult): void {
+  const logLines: string[] = [];
+
+  for (const f of result.files) {
+    const pct = (f.score * 100).toFixed(0);
+    const bar = scoreBar(f.score);
+
+    let status: string;
+    if (f.skippedReason) {
+      status = `· skipped (${f.skippedReason})`;
+    } else if (f.rewritten) {
+      status = `✓ humanized & re-staged`;
+    } else {
+      status = `✓ ok`;
+    }
+
+    logLines.push(`  ${f.path}: ${pct}% ${bar} ${status}`);
+
+    // log fired signals for rewritten or high-score files
+    if (f.rewritten || f.score >= 0.5) {
+      const fired = f.signals.filter((s) => s.fired);
+      fired.forEach((s) => logLines.push(`    ↳ [${s.family}] ${s.description}`));
+    }
+  }
+
+  if (result.rewrittenFiles > 0) {
+    logLines.push(`  → ${result.rewrittenFiles} file(s) humanized and re-staged`);
+  }
+
+  // write to .bypasser.log
+  writeLog(cwd, logLines);
+
+  // Windows toast
+  if (result.rewrittenFiles > 0) {
+    notifyWindows({
+      title: "BypasserAI — Humanized",
+      message: `${result.rewrittenFiles} file(s) rewritten before commit.`,
+      type: "warning",
+    });
+  } else {
+    notifyWindows({
+      title: "BypasserAI — Clean",
+      message: `${result.totalFiles} file(s) scanned. All ok.`,
+      type: "info",
+    });
+  }
 }
