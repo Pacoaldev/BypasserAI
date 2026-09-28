@@ -11,7 +11,7 @@ const HOOK_MARKER = "# bypasser-ai";
 
 const HOOK_SCRIPT = `#!/bin/sh
 ${HOOK_MARKER}
-npx bypasser-ai audit --pre-commit
+bypasser audit --pre-commit
 exit $?
 `;
 
