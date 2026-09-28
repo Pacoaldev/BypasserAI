@@ -1,1 +1,27 @@
-docs/*
+# Docs are intentionally tracked (docs/SKILL.md is required at runtime)
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment & config secrets
+.env
+.env.*
+.bypasser.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript cache
+*.tsbuildinfo
