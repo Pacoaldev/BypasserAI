@@ -91,26 +91,33 @@ async function main() {
         const result = await runAudit({ cwd, dryRun, verbose });
 
         if (result.totalFiles === 0) {
-          if (!preCommit) console.log("No eligible staged files.");
+          // always print something so the user knows the hook ran
+          if (preCommit) console.log("bypasser-ai: nothing to scan.");
+          else console.log("No eligible staged files.");
           process.exit(0);
         }
 
-        if (!preCommit || verbose) {
-          console.log(
-            `\nbypasser-ai: ${result.totalFiles} file(s) scanned, ${result.rewrittenFiles} rewritten`
-          );
-          for (const f of result.files) {
-            const pct = (f.score * 100).toFixed(0);
-            const status = f.rewritten
-              ? "✓ rewritten"
-              : f.skippedReason
-              ? `· skipped (${f.skippedReason})`
-              : "✓ ok";
-            console.log(`  ${f.path}: ${pct}% ${status}`);
+        // always print the per-file summary — visible in every IDE's commit output
+        console.log(`\nbypasser-ai — ${result.totalFiles} file(s) scanned`);
+        for (const f of result.files) {
+          const pct = (f.score * 100).toFixed(0);
+          const bar = scoreBar(f.score);
+
+          let status: string;
+          if (f.skippedReason) {
+            status = `· skipped (${f.skippedReason})`;
+          } else if (f.rewritten) {
+            status = `✓ humanized & re-staged`;
+          } else {
+            status = `✓ ok`;
           }
-        } else if (result.rewrittenFiles > 0) {
+
+          console.log(`  ${f.path}: ${pct}% ${bar} ${status}`);
+        }
+
+        if (result.rewrittenFiles > 0) {
           console.log(
-            `bypasser-ai: ${result.rewrittenFiles} file(s) humanized and re-staged`
+            `\n  → ${result.rewrittenFiles} file(s) rewritten. Commit will use humanized version.`
           );
         }
 
@@ -118,7 +125,7 @@ async function main() {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`bypasser-ai error: ${msg}`);
-        // don't block the commit on tool errors
+        // never block the commit on tool errors
         process.exit(0);
       }
     }
