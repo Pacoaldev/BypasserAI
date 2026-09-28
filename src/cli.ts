@@ -169,7 +169,7 @@ ENVIRONMENT VARIABLES
   BYPASSER_MODEL        Model name (default: gpt-4o)
 
 DOCS
-  https://github.com/your-org/bypasser-ai
+  https://github.com/pacoaldev/bypasser-ai
 `);
 }
 

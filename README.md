@@ -29,53 +29,61 @@ rewritten content is re-staged automatically
 commit proceeds
 ```
 
-The detector is fully deterministic — no API calls, works in CI for free. The rewriter uses your configured model only on files that actually need it.
+The detector is fully deterministic — no API calls, works in CI for free. The rewriter only calls the API on files that actually score above the threshold.
 
 ---
 
-## Quick start
+## Prerequisites
+
+- Node.js 18 or higher
+- A git repository (the hook installs into `.git/hooks/`)
+- An API key for any OpenAI-compatible provider (OpenAI, Groq, Ollama local, etc.)
+
+---
+
+## Installation
+
+### Option A — Use directly from this repo (recommended while not yet on npm)
 
 ```bash
-# 1. Install globally or in your project
+# 1. Clone the repo
+git clone https://github.com/your-org/bypasser-ai.git
+cd bypasser-ai
+
+# 2. Install dependencies
+npm install
+
+# 3. Build the TypeScript source
+npm run build
+
+# 4. Link the CLI globally so you can run it from any project
+npm link
+```
+
+After `npm link`, the `bypasser` command is available everywhere on your machine.
+
+### Option B — Once published to npm
+
+```bash
 npm install -g bypasser-ai
-# or: npx bypasser-ai
-
-# 2. Initialize config in your repo
-bypasser init
-
-# 3. Add your API key (or set env var)
-export BYPASSER_API_KEY=sk-...
-
-# 4. Install the pre-commit hook
-bypasser install
-
-# Done. Every commit is now scanned automatically.
+# or use without installing: npx bypasser-ai <command>
 ```
 
 ---
 
-## Commands
+## Setup in your project
+
+Run these steps inside the project you want to protect — **not** inside the bypasser-ai repo itself.
 
 ```bash
-bypasser init                 # Create .bypasser.json with defaults
-bypasser install              # Install pre-commit git hook
-bypasser uninstall            # Remove pre-commit git hook
+# 1. Go to your project
+cd my-project
 
-bypasser detect               # Score staged files, report AI signals
-bypasser detect --verbose     # Show individual signal details per file
-
-bypasser rewrite <file>       # Rewrite a specific file via the API
-
-bypasser audit                # Detect + rewrite staged files above threshold
-bypasser audit --dry-run      # Detect only, no API calls, no restaging
-bypasser audit --verbose      # Show per-file details
+# 2. Create the config file
+bypasser init
 ```
 
----
-
-## Configuration
-
-Create `.bypasser.json` in your project root (or run `bypasser init`):
+This creates `.bypasser.json` in your project root:
 
 ```json
 {
@@ -83,37 +91,139 @@ Create `.bypasser.json` in your project root (or run `bypasser init`):
   "model": "gpt-4o",
   "threshold": 0.65,
   "maxTokens": 4096,
-  "ignore": ["src/generated/**", "*.graphql"]
+  "ignore": []
 }
 ```
+
+```bash
+# 3. Set your API key (never put it in .bypasser.json — use an env var)
+export BYPASSER_API_KEY=sk-...
+
+# On Windows (PowerShell):
+$env:BYPASSER_API_KEY = "sk-..."
+
+# 4. Install the pre-commit hook
+bypasser install
+```
+
+That's it. From now on, every `git commit` in that project is scanned automatically.
+
+---
+
+## What happens on commit
+
+When you run `git commit`, the hook fires and you'll see output like this:
+
+```
+bypasser-ai: 3 file(s) scanned, 1 rewritten and re-staged
+```
+
+Or with `--verbose` enabled in the hook:
+
+```
+[src/utils.ts] score: 72% ⚠ ABOVE THRESHOLD
+  ✗ [naming] Over-descriptive variable names (processData, handleResult)
+  ✗ [comments] Comments describe what the code does (obvious narration)
+  ✗ [error-handling] Every catch block has custom error class or full logging
+
+[src/index.ts] score: 31% ✓ ok
+
+bypasser-ai: 2 file(s) scanned, 1 rewritten and re-staged
+```
+
+The rewritten file is automatically re-staged. The commit proceeds with the humanized version.
+
+---
+
+## Manual commands
+
+You can also run the tool manually at any time:
+
+```bash
+# Check staged files without touching anything
+bypasser detect
+
+# See which specific signals fired
+bypasser detect --verbose
+
+# Rewrite a specific file (not necessarily staged)
+bypasser rewrite src/utils.ts
+
+# Full pipeline on staged files: detect + rewrite + restage
+bypasser audit
+
+# Dry run: detect only, no API calls, no file changes
+bypasser audit --dry-run
+
+# Audit with per-file signal details
+bypasser audit --verbose
+
+# Remove the pre-commit hook
+bypasser uninstall
+```
+
+---
+
+## Configuration
+
+`.bypasser.json` in your project root controls all behavior:
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `baseURL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
 | `model` | `gpt-4o` | Model name for your provider |
-| `threshold` | `0.65` | AI-score above which rewrite triggers (0–1) |
+| `threshold` | `0.65` | Score (0–1) above which rewrite triggers |
 | `maxTokens` | `4096` | Max tokens for rewrite response |
-| `ignore` | `[]` | Extra glob patterns to skip |
+| `ignore` | `[]` | Extra glob patterns to never rewrite |
 
-### Environment variables (override .bypasser.json)
+### Environment variables
 
-```bash
-BYPASSER_API_KEY     # API key
-BYPASSER_BASE_URL    # API base URL
-BYPASSER_MODEL       # Model name
-OPENAI_API_KEY       # Fallback if BYPASSER_API_KEY not set
+These override `.bypasser.json` and are the safe way to pass secrets:
+
+| Variable | Description |
+|----------|-------------|
+| `BYPASSER_API_KEY` | Your API key |
+| `BYPASSER_BASE_URL` | API base URL |
+| `BYPASSER_MODEL` | Model name |
+| `OPENAI_API_KEY` | Fallback if `BYPASSER_API_KEY` is not set |
+
+### Compatible API providers
+
+Anything that speaks the OpenAI chat completions protocol works:
+
+| Provider | Base URL |
+|----------|----------|
+| OpenAI | `https://api.openai.com/v1` |
+| [Groq](https://groq.com) (fast, free tier) | `https://api.groq.com/openai/v1` |
+| [OpenRouter](https://openrouter.ai) | `https://openrouter.ai/api/v1` |
+| [Ollama](https://ollama.ai) (local, no cost) | `http://localhost:11434/v1` |
+| [LM Studio](https://lmstudio.ai) (local, no cost) | `http://localhost:1234/v1` |
+| 9Router (local) | `http://localhost:20128/v1` |
+| Anthropic via proxy | depends on proxy |
+
+**9Router example config:**
+
+```json
+{
+  "baseURL": "http://localhost:20128/v1",
+  "model": "cbai/deepseek-v4.1-flash",
+  "threshold": 0.65,
+  "maxTokens": 4096,
+  "ignore": []
+}
 ```
 
-### Compatible providers
+> 9Router doesn't validate the API key but the SDK requires a non-empty value. Set `BYPASSER_API_KEY=local` or any placeholder string.
 
-Any endpoint that speaks the OpenAI chat completions protocol:
+---
 
-- OpenAI (`https://api.openai.com/v1`)
-- Anthropic via proxy
-- [Ollama](https://ollama.ai) (`http://localhost:11434/v1`) — local, no cost
-- [LM Studio](https://lmstudio.ai) (`http://localhost:1234/v1`) — local, no cost
-- [OpenRouter](https://openrouter.ai) (`https://openrouter.ai/api/v1`)
-- [Groq](https://groq.com) (`https://api.groq.com/openai/v1`)
+## Files always skipped
+
+These are never sent for rewriting regardless of score:
+
+`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `dist/**`, `build/**`, `.next/**`, `*.min.js`, `*.snap`, `*.json`, `*.yaml`, `*.yml`, `*.toml`
+
+Add your own patterns in `.bypasser.json` → `ignore`.
 
 ---
 
@@ -121,24 +231,14 @@ Any endpoint that speaks the OpenAI chat completions protocol:
 
 The detector scores six signal families without calling any API:
 
-| Family | Examples |
-|--------|---------|
-| **Naming** | All identifiers fully descriptive, no `aux`/`tmp`/`idx`; over-engineered names like `processData`, `handleResult` |
-| **Structure** | 100% uniform arrow functions; every function using the same early-return pattern; long method chains without intermediate vars |
-| **Comments** | Narration comments (`// This function validates...`); JSDoc on every function |
+| Family | What triggers it |
+|--------|-----------------|
+| **Naming** | All variables fully descriptive, no `aux`/`tmp`/`idx`; names like `processData`, `handleResult` |
+| **Structure** | 100% uniform arrow functions; identical patterns across all functions; long method chains |
+| **Comments** | Narration comments (`// This function validates...`); JSDoc on every single function |
 | **Error handling** | Every `catch` with custom error class; every async function wrapped in `try/catch` |
-| **Abstraction** | All repeated logic immediately extracted; interface for every small inline type |
-| **Uniformity** | Zero short variable names; every function block following identical structure |
-
-Files scoring below the threshold pass through untouched. Files above threshold go to the rewriter.
-
----
-
-## Files always skipped
-
-Lock files, build artifacts, config files, and generated content are never sent for rewriting:
-
-`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `dist/**`, `build/**`, `.next/**`, `*.min.js`, `*.snap`, `*.json`, `*.yaml`, `*.yml`, `*.toml`
+| **Abstraction** | All repeated logic immediately extracted; interface defined for every small inline type |
+| **Uniformity** | Zero short variable names; every function block structurally identical |
 
 ---
 
@@ -148,14 +248,14 @@ Lock files, build artifacts, config files, and generated content are never sent 
 src/
   cli.ts        Entry point, command router
   config.ts     Config loader (.bypasser.json + env vars)
-  detector.ts   Deterministic AI-pattern scorer
-  rewriter.ts   OpenAI-compatible API client
+  detector.ts   Deterministic AI-pattern scorer (no API)
+  rewriter.ts   OpenAI-compatible API client + humanizer prompt
   git.ts        Staged diff reader + file restager
   installer.ts  Pre-commit hook writer/remover
   audit.ts      Full pipeline: detect → rewrite → restage
   index.ts      Public library exports
 docs/
-  SKILL.md      Humanizer skill prompt (loaded by rewriter)
+  SKILL.md      Humanizer skill prompt (loaded at runtime by rewriter.ts)
 ```
 
 ---
@@ -165,4 +265,4 @@ docs/
 - Does not apply to config files, lock files, or generated artifacts
 - Never degrades correctness, security, or legibility to appear human
 - Not intended for academic plagiarism evasion — only for natural Git authorship style
-- The detector uses heuristics, not an AST parser; false positives are possible on unusual codebases
+- The detector uses heuristics, not a full AST parser; false positives are possible on unusual codebases. Adjust `threshold` up if it fires too often
