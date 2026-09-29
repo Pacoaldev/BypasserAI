@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { matchGlob, shouldIgnore, getWorkingTreeFiles, getStagedFiles } from "../src/git.js";
+import { matchGlob, shouldIgnore, getWorkingTreeFiles } from "../src/git.js";
 import { resolveThreshold, type BypasserConfig } from "../src/config.js";
 
 test("matchGlob: * matches within a path segment", () => {

@@ -184,18 +184,18 @@ export function install(cwd = process.cwd()): void {
 function registerAumid(): void {
   const script = `
 $ErrorActionPreference = 'Stop'
-\$aumid = 'BypasserAI.Notifier'
-\$key = 'HKCU:\\Software\\Classes\\AppUserModelId\\' + \$aumid
-if (-not (Test-Path \$key)) {
-  New-Item -Path \$key -Force | Out-Null
+$aumid = 'BypasserAI.Notifier'
+$key = 'HKCU:\\Software\\Classes\\AppUserModelId\\' + $aumid
+if (-not (Test-Path $key)) {
+  New-Item -Path $key -Force | Out-Null
 }
-Set-ItemProperty -Path \$key -Name 'DisplayName' -Value 'BypasserAI' -Force
-Set-ItemProperty -Path \$key -Name 'ShowInSettings' -Value 1 -Force
-\$cap = \$key + '\\Capabilities'
-if (-not (Test-Path \$cap)) {
-  New-Item -Path \$cap -Force | Out-Null
+Set-ItemProperty -Path $key -Name 'DisplayName' -Value 'BypasserAI' -Force
+Set-ItemProperty -Path $key -Name 'ShowInSettings' -Value 1 -Force
+$cap = $key + '\\Capabilities'
+if (-not (Test-Path $cap)) {
+  New-Item -Path $cap -Force | Out-Null
 }
-Set-ItemProperty -Path \$cap -Name 'ShellStructured' -Value 'Toast' -Force
+Set-ItemProperty -Path $cap -Name 'ShellStructured' -Value 'Toast' -Force
 `.trim();
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   const result = spawnSync(
