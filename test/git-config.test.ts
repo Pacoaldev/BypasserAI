@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { matchGlob, shouldIgnore, getWorkingTreeFiles } from "../src/git.js";
+import { matchGlob, shouldIgnore, getWorkingTreeFiles, getStagedFiles } from "../src/git.js";
 import { resolveThreshold, type BypasserConfig } from "../src/config.js";
 
 test("matchGlob: * matches within a path segment", () => {
@@ -84,6 +84,42 @@ test("getWorkingTreeFiles: sees unstaged + untracked files without staging", () 
     const fresh = files.find((f) => f.path === "fresh.ts")!;
     assert.match(fresh.diff, /^\+\+\+ b\/fresh\.ts/m);
     assert.match(fresh.content, /export const b = 3;/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getStagedFiles: staged deletion does not leak git's 'fatal:' to stderr", () => {
+  // Regression: getStagedFiles probes `git show :path` for every staged path.
+  // On a staged deletion that fails, and if the child's stderr is inherited the
+  // raw `fatal: path '...' does not exist` is printed into the user's commit
+  // output. Run it in a child process so we can observe stderr directly.
+  const dir = mkdtempSync(join(tmpdir(), "bypasser-del-"));
+  const git = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  try {
+    git(["init", "-q"]);
+    git(["config", "user.email", "t@t.t"]);
+    git(["config", "user.name", "t"]);
+    writeFileSync(join(dir, "doomed.ts"), "export const x = 1;\n");
+    git(["add", "."]);
+    git(["commit", "-qm", "init"]);
+
+    git(["rm", "-q", "doomed.ts"]);
+    writeFileSync(join(dir, "fresh.ts"), "export const z = 3;\n");
+    git(["add", "fresh.ts"]);
+
+    const moduleUrl = new URL("../src/git.ts", import.meta.url).href;
+    const cfg = JSON.stringify(baseConfig());
+    const script =
+      `import { getStagedFiles } from ${JSON.stringify(moduleUrl)};` +
+      `process.stdout.write(JSON.stringify(getStagedFiles(${JSON.stringify(dir)}, ${cfg}).map(f => f.path)));`;
+    const res = spawnSync(process.execPath, ["--import", "tsx", "-e", script], {
+      encoding: "utf8",
+    });
+
+    assert.equal(res.status, 0, res.stderr);
+    assert.doesNotMatch(res.stderr, /fatal:/, "git fatal must not leak to stderr");
+    assert.deepEqual(JSON.parse(res.stdout), ["fresh.ts"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

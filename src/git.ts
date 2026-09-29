@@ -15,7 +15,15 @@ export type FileSource = "staged" | "worktree";
 
 /** Run a git command with an argv array — avoids shell quoting/injection. */
 function git(args: string[], cwd: string): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" });
+  // Capture stderr instead of inheriting it: several callers probe paths that
+  // are expected to fail (e.g. `git show :path` on a staged deletion) and
+  // swallow the error. Inheriting stderr would leak `fatal: path ... does not
+  // exist` into the user's commit output on every file deletion.
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 /** Run a git command and return stdout, or null when it exits non-zero. */
