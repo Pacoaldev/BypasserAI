@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   notifyWindows,
   buildScript,
+  POWERSHELL_AUMID,
   _resetBurntToastCache,
   _setBurntToastAvailable,
 } from "../src/notifier.js";
@@ -11,6 +12,31 @@ test("buildScript: values are read from env, never inlined", () => {
   const script = buildScript("Information");
   assert.match(script, /\$env:BYPASSER_TOAST_TITLE/);
   assert.match(script, /\$env:BYPASSER_TOAST_MSG/);
+});
+
+test("buildScript: uses the persistent WinRT toast under the PowerShell AUMID", () => {
+  _resetBurntToastCache();
+  const script = buildScript("Information");
+  // The WinRT path is what makes the toast survive in the Action Center.
+  assert.match(script, /Windows\.UI\.Notifications\.ToastNotificationManager/);
+  assert.match(script, /CreateToastNotifier\(/);
+  // Registered AUMID — an arbitrary one is silently dropped by Windows.
+  assert.match(script, /WindowsPowerShell/);
+  assert.ok(script.includes(POWERSHELL_AUMID));
+  // The deprecated balloon must remain only as a fallback inside catch.
+  assert.match(script, /catch/);
+});
+
+test("buildScript: toast title/message are XML-escaped before embedding", () => {
+  const script = buildScript("Information");
+  assert.match(script, /SecurityElement\]::Escape/);
+});
+
+test("buildScript: BurntToast block is skipped once the probe failed", () => {
+  _setBurntToastAvailable(false);
+  const script = buildScript("Information");
+  assert.doesNotMatch(script, /New-BurntToastNotification/);
+  _resetBurntToastCache();
 });
 
 test("notifyWindows: no-op on non-Windows platforms", () => {

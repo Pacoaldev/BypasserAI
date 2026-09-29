@@ -14,16 +14,24 @@ export interface NotifyDeps {
   spawnFn?: typeof spawn;
 }
 
+// Well-known AppUserModelID for Windows PowerShell. Registering the toast under
+// it is what makes the notification persist in the Action Center; an arbitrary
+// AUMID is silently dropped by Windows.
+export const POWERSHELL_AUMID =
+  "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+
 // Cache whether BurntToast is available so we don't pay a PowerShell cold
-// start on *every* commit. `undefined` = not probed yet.
+// start probing it on *every* commit. `undefined` = not probed yet.
 let burntToastAvailable: boolean | undefined;
 
 /**
  * Fire a Windows toast notification, non-blocking.
  *
  * The commit must never wait on a UI toast, so this spawns a detached
- * PowerShell process and returns immediately. Tries BurntToast first (probed
- * once, cached), then falls back to a Shell balloon.
+ * PowerShell process and returns immediately. Prefers BurntToast when
+ * installed, then the native WinRT toast (which persists in the Action
+ * Center), and only falls back to the legacy balloon last — Windows 11
+ * deprecates that balloon and drops it almost immediately.
  */
 export function notifyWindows(opts: NotifyOptions, deps: NotifyDeps = {}): void {
   const platform = deps.platform ?? process.platform;
@@ -58,25 +66,41 @@ export function notifyWindows(opts: NotifyOptions, deps: NotifyDeps = {}): void 
 
 /**
  * Build the PowerShell script. Values are read from env vars, never inlined,
- * so quotes/`$`/backticks in the title or message cannot break out.
- * When BurntToast is unavailable (cached probe), the script itself exits so
- * the caller does not need a second cold start.
+ * so quotes/`$`/backticks in the title or message cannot break out. When the
+ * BurntToast probe has already failed (cached), that block is omitted so the
+ * caller does not pay a second cold start.
  */
 export function buildScript(icon: string): string {
   const useBurntToast = burntToastAvailable !== false;
-  const probe = useBurntToast
-    ? "if (-not (Get-Module -ListAvailable -Name BurntToast)) { exit 3 }"
+  const burntToastBlock = useBurntToast
+    ? `
+if (Get-Module -ListAvailable -Name BurntToast) {
+  Import-Module BurntToast -ErrorAction SilentlyContinue
+  New-BurntToastNotification -Text $title, $msg | Out-Null
+  exit 0
+}
+`
     : "";
 
   return `
 $ErrorActionPreference = 'Stop'
 $title = $env:BYPASSER_TOAST_TITLE
 $msg = $env:BYPASSER_TOAST_MSG
-${probe}
-if (Get-Module -ListAvailable -Name BurntToast) {
-  Import-Module BurntToast -ErrorAction SilentlyContinue
-  New-BurntToastNotification -Text $title, $msg | Out-Null
-} else {
+${burntToastBlock}
+# Native WinRT toast under the PowerShell AUMID — persists in the Action Center.
+# The legacy System.Windows.Forms balloon below is only a last resort: Windows 11
+# deprecates it and dismisses it almost instantly, which is why the toast was
+# invisible before.
+try {
+  [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+  [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+  $safeTitle = [System.Security.SecurityElement]::Escape($title)
+  $safeMsg = [System.Security.SecurityElement]::Escape($msg)
+  $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+  $xml.LoadXml('<toast duration="long"><visual><binding template="ToastGeneric"><text>' + $safeTitle + '</text><text>' + $safeMsg + '</text></binding></visual></toast>')
+  $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${POWERSHELL_AUMID}').Show($toast)
+} catch {
   Add-Type -AssemblyName System.Windows.Forms
   $n = New-Object System.Windows.Forms.NotifyIcon
   $n.Icon = [System.Drawing.SystemIcons]::${icon}

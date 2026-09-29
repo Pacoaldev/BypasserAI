@@ -124,7 +124,7 @@ A native Windows notification appears in the corner of your screen:
 - **BypasserAI — Humanized** → one or more files were rewritten before commit
 - **BypasserAI — Rewrite failed** → a file needed rewriting but the API call failed (check `.bypasser.log`)
 
-Works in any IDE (Cursor, Kiro, Antigravity, OpenCode, Pi) without any extra setup. Uses BurntToast if installed, falls back to a Windows balloon notification otherwise.
+Works in any IDE (Cursor, Kiro, Antigravity, OpenCode, Pi) without any extra setup. Uses BurntToast if installed; otherwise it fires a native WinRT toast that persists in the Windows Action Center. (The legacy balloon is only a last resort — Windows 11 deprecates it and dismisses it almost instantly.)
 
 ### 2. `.bypasser.log` file
 
@@ -306,7 +306,7 @@ src/
   installer.ts  Pre-commit hook writer/remover
   audit.ts      Full pipeline: detect → rewrite → restage → log → notify
   logger.ts     Appends timestamped results to .bypasser.log
-  notifier.ts   Windows toast notifications (BurntToast or balloon fallback)
+  notifier.ts   Windows toast notifications (BurntToast → WinRT → balloon)
   index.ts      Public library exports
 docs/
   SKILL.md      Humanizer skill prompt (loaded at runtime by rewriter.ts)
