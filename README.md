@@ -122,6 +122,7 @@ A native Windows notification appears in the corner of your screen:
 
 - **BypasserAI — Clean** → all files passed, nothing rewritten
 - **BypasserAI — Humanized** → one or more files were rewritten before commit
+- **BypasserAI — Rewrite failed** → a file needed rewriting but the API call failed (check `.bypasser.log`)
 
 Works in any IDE (Cursor, Kiro, Antigravity, OpenCode, Pi) without any extra setup. Uses BurntToast if installed, falls back to a Windows balloon notification otherwise.
 
@@ -145,7 +146,7 @@ A log file is created automatically in your project root and updated after every
 
 Open it once in your IDE and leave it as a tab — it updates automatically after each commit.
 
-> `.bypasser.log` is automatically added to `.gitignore` and never committed.
+> `.bypasser.log` and `.bypasser.state.json` are automatically added to `.gitignore` by `bypasser init` and never committed.
 
 ### 3. Terminal output (when running manually)
 
@@ -172,6 +173,9 @@ You can also run the tool manually at any time:
 ```bash
 # Check staged files without touching anything
 bypasser detect
+
+# Score the working tree WITHOUT staging — see the % while you edit
+bypasser detect --all
 
 # See which specific signals fired
 bypasser detect --verbose
@@ -259,6 +263,22 @@ Add your own patterns in `.bypasser.json` → `ignore`.
 
 ---
 
+## How the score works
+
+The detector fires a **cluster** of correlated signals (naming + structure +
+comments + uniformity) and maps their combined weight through a saturating
+curve (`1 - e^(-w/2.5)`). This matters: AI-generated code rarely trips *every*
+signal, so a plain "fired ÷ total" ratio would cap around 45% and never reach a
+usable threshold. With the saturating curve, textbook AI code lands in the
+**70–85%** band while ordinary human code stays **below ~35%**. The default
+threshold is `0.65`.
+
+Because a single weak signal (descriptive names, a `try/catch`) is good
+practice rather than proof of AI authorship, the score is clamped to 0 until at
+least `0.6` total signal weight has fired.
+
+---
+
 ## What the detector checks
 
 The detector scores six signal families without calling any API:
@@ -299,7 +319,8 @@ docs/
 - Does not apply to config files, lock files, or generated artifacts
 - Never degrades correctness, security, or legibility to appear human
 - Not intended for academic plagiarism evasion — only for natural Git authorship style
-- The detector uses heuristics, not a full AST parser; false positives are possible on unusual codebases. Adjust `threshold` up if it fires too often
+- The detector uses heuristics, not a full AST parser; false positives are possible on unusual codebases. Raise `threshold` if it fires too often, or use per-glob `thresholds` to relax it for legacy folders
+- If a rewrite fails (API down, bad key), the commit is **never blocked**: the failure is reported in the terminal, written to `.bypasser.log`, and surfaced as an error toast
 
 ---
 

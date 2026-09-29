@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { matchGlob, shouldIgnore } from "../src/git.js";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { matchGlob, shouldIgnore, getWorkingTreeFiles } from "../src/git.js";
 import { resolveThreshold, type BypasserConfig } from "../src/config.js";
 
 test("matchGlob: * matches within a path segment", () => {
@@ -53,4 +57,34 @@ test("resolveThreshold: first matching per-glob rule wins", () => {
   assert.equal(resolveThreshold("src/legacy/a.ts", cfg, matchGlob), 0.3);
   assert.equal(resolveThreshold("src/a.ts", cfg, matchGlob), 0.5);
   assert.equal(resolveThreshold("src/a.py", cfg, matchGlob), 0.65);
+});
+
+test("getWorkingTreeFiles: sees unstaged + untracked files without staging", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bypasser-wt-"));
+  const git = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  try {
+    git(["init", "-q"]);
+    git(["config", "user.email", "t@t.t"]);
+    git(["config", "user.name", "t"]);
+
+    // committed baseline
+    writeFileSync(join(dir, "tracked.ts"), "export const a = 1;\n");
+    git(["add", "tracked.ts"]);
+    git(["commit", "-qm", "init"]);
+
+    // modify tracked (unstaged) and add a brand-new untracked file
+    writeFileSync(join(dir, "tracked.ts"), "export const a = 2;\n");
+    writeFileSync(join(dir, "fresh.ts"), "export const b = 3;\n");
+
+    const files = getWorkingTreeFiles(dir, baseConfig());
+    const paths = files.map((f) => f.path).sort();
+    assert.deepEqual(paths, ["fresh.ts", "tracked.ts"]);
+
+    // untracked file gets a synthesised diff whose content matches the file
+    const fresh = files.find((f) => f.path === "fresh.ts")!;
+    assert.match(fresh.diff, /^\+\+\+ b\/fresh\.ts/m);
+    assert.match(fresh.content, /export const b = 3;/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

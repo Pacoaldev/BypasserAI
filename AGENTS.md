@@ -21,7 +21,7 @@ src/cli.ts        → command router (init / install / detect / rewrite / audit)
 src/config.ts     → loads .bypasser.json and env vars (+ per-glob thresholds, temperature)
 src/detector.ts   → deterministic AI-pattern scorer (no API, six signal families)
 src/rewriter.ts   → calls OpenAI-compatible API using docs/SKILL.md as system prompt
-src/git.ts        → reads staged diff via `git show :path`, writes rewritten content back and re-stages
+src/git.ts        → reads staged diff via `git show :path`, writes rewritten content back and re-stages; also `getWorkingTreeFiles()` for `detect --all`
 src/installer.ts  → writes/removes the pre-commit hook in .git/hooks/
 src/audit.ts      → full pipeline: detect → rewrite → restage
 src/logger.ts     → appends .bypasser.log + persists rewrite hashes in .bypasser.state.json
@@ -54,6 +54,9 @@ bypasser install
 
 # Manually detect AI patterns in staged files
 bypasser detect --verbose
+
+# Score changed files in the working tree, no staging required
+bypasser detect --all
 
 # Manually rewrite a file
 bypasser rewrite src/utils.ts
@@ -100,7 +103,11 @@ When working on `src/detector.ts`, these are the six families and their intent:
 | `abstraction` | Immediate extraction of all repeated code, interface for every small type |
 | `uniformity` | Zero single-letter vars, every function block structurally identical |
 
-Each signal has a `weight` (0–1), a `test(code)` predicate, and an `isApplicable(ctx)` predicate. The final score is `firedWeight / applicableWeight` (normalised only over signals that can fire in the given context), clamped to [0, 1]. Files at or above the effective threshold (per-glob override via `config.thresholds`, else `config.threshold`, default 0.65) are sent for rewriting.
+Each signal has a `weight` (0–1), a `test(code)` predicate, and an `isApplicable(ctx)` predicate. The final score maps the **fired** weight through a saturating curve `1 - e^(-w / 2.5)`, clamped to [0, 1] and forced to 0 below `0.6` total fired weight.
+
+> Why not `firedWeight / applicableWeight`? AI code fires a *correlated cluster* of signals, not all of them, so a plain ratio caps around 0.45 — below any usable threshold, which meant nothing ever got rewritten. The saturating curve puts realistic AI code at 70–85% and clean code under ~35%. Do not "fix" it back to a ratio.
+
+Files at or above the effective threshold (per-glob override via `config.thresholds`, else `config.threshold`, default 0.65) are sent for rewriting.
 
 ---
 

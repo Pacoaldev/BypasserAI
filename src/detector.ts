@@ -52,7 +52,9 @@ const SIGNALS: SignalDef[] = [
   {
     family: "naming",
     description: "All identifiers are fully descriptive (no aux/tmp/res/idx)",
-    weight: 0.8,
+    // Weak signal: plenty of careful human code avoids short locals too.
+    // It only matters as part of a wider AI cluster, never on its own.
+    weight: 0.4,
     isApplicable: ({ code }) => (code.match(/\b(?:const|let|var)\s+\w+/g) ?? []).length >= 3,
     test: (code) => {
       const declarations = code.match(/\b(?:const|let|var)\s+(\w+)/g) ?? [];
@@ -138,7 +140,8 @@ const SIGNALS: SignalDef[] = [
   {
     family: "error-handling",
     description: "Every catch block has custom error class or full logging",
-    weight: 0.8,
+    // Good practice, not an AI tell — kept weak so it cannot flag healthy code.
+    weight: 0.45,
     isApplicable: ({ code }) => (code.match(/catch\s*\([^)]*\)\s*\{/g) ?? []).length >= 2,
     test: (code) => {
       const catchBlocks = (code.match(/catch\s*\([^)]*\)\s*\{/g) ?? []).length;
@@ -152,7 +155,8 @@ const SIGNALS: SignalDef[] = [
   {
     family: "error-handling",
     description: "Every async function wrapped in try/catch",
-    weight: 0.75,
+    // Also good practice rather than an AI tell — weak on purpose.
+    weight: 0.45,
     isApplicable: ({ code }) =>
       (code.match(/async\s+(?:function\s+\w+|\w+\s*=>|\(\w*\)\s*=>)/g) ?? []).length >= 2,
     test: (code) => {
@@ -221,6 +225,29 @@ const SIGNALS: SignalDef[] = [
 // Scorer
 // ---------------------------------------------------------------------------
 
+/**
+ * Reference weight for the saturating score curve.
+ *
+ * AI-generated code does not fire *every* signal — it fires a correlated
+ * *cluster* of them at once (naming + structure + comments + uniformity).
+ * Dividing the fired weight by the total applicable weight therefore has a
+ * hard ceiling around 0.45 in practice, which is below any usable threshold:
+ * a file could be textbook AI slop and still report "ok".
+ *
+ * Instead we map the fired weight through `1 - e^(-w / REF)`, which rises
+ * quickly for the first few signals and then saturates. REF is tuned so that a
+ * realistic AI cluster (~3.5–4.5 total weight) lands in the 0.75–0.85 band,
+ * while genuinely human code (0–1 weak signals) stays well under 0.35.
+ */
+const SCORE_REFERENCE_WEIGHT = 2.5;
+
+/**
+ * Minimum total fired weight before a score is reported at all. A single weak
+ * signal (e.g. only "all identifiers are descriptive") is not evidence of AI
+ * authorship and would otherwise push a score above zero for clean code.
+ */
+const MIN_FIRED_WEIGHT = 0.6;
+
 export function detectAI(code: string, filePath?: string): DetectorResult {
   const ctx: SignalContext = { code, filePath };
 
@@ -232,15 +259,15 @@ export function detectAI(code: string, filePath?: string): DetectorResult {
     fired: s.isApplicable(ctx) ? s.test(code) : false,
   }));
 
-  // normalise over applicable signals only — signals that cannot fire in this
-  // context don't penalise the score
-  const applicable = SIGNALS.filter((s) => s.isApplicable(ctx));
-  const applicableWeight = applicable.reduce((acc, s) => acc + s.weight, 0);
   const firedWeight = signals
     .filter((s) => s.fired)
     .reduce((acc, s) => acc + s.weight, 0);
 
-  const score = applicableWeight > 0 ? Math.min(firedWeight / applicableWeight, 1) : 0;
+  if (firedWeight < MIN_FIRED_WEIGHT) {
+    return { score: 0, signals };
+  }
+
+  const score = Math.min(1 - Math.exp(-firedWeight / SCORE_REFERENCE_WEIGHT), 1);
 
   return { score, signals };
 }

@@ -24,6 +24,8 @@ export interface AuditResult {
   files: FileAuditResult[];
   totalFiles: number;
   rewrittenFiles: number;
+  /** Files that scored above threshold but could not be rewritten (API error). */
+  errorFiles: number;
 }
 
 function scoreBar(score: number): string {
@@ -140,20 +142,27 @@ export async function runAudit(opts: {
         rewritten: res.changed,
       });
     } catch (err) {
-      console.error(`[bypasser] rewrite failed for ${file.path}:`, err);
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[bypasser] rewrite failed for ${file.path}: ${reason}`);
       results.push({
         path: file.path,
         score: detection.score,
         threshold,
         signals: detection.signals,
         rewritten: false,
-        skippedReason: "rewrite error",
+        skippedReason: `rewrite error: ${reason}`,
       });
     }
   }
 
   const rewrittenFiles = results.filter((r) => r.rewritten).length;
-  const result: AuditResult = { files: results, totalFiles: results.length, rewrittenFiles };
+  const errorFiles = results.filter((r) => r.skippedReason?.startsWith("rewrite error")).length;
+  const result: AuditResult = {
+    files: results,
+    totalFiles: results.length,
+    rewrittenFiles,
+    errorFiles,
+  };
 
   // --- Log + notify (non-blocking, always runs) ---
   if (results.length > 0) {
@@ -191,6 +200,9 @@ function _writeLogAndNotify(cwd: string, result: AuditResult): void {
   if (result.rewrittenFiles > 0) {
     logLines.push(`  → ${result.rewrittenFiles} file(s) humanized and re-staged`);
   }
+  if (result.errorFiles > 0) {
+    logLines.push(`  → ${result.errorFiles} file(s) could NOT be rewritten (API error) — see lines above`);
+  }
 
   // write to .bypasser.log
   writeLog(cwd, logLines);
@@ -201,6 +213,12 @@ function _writeLogAndNotify(cwd: string, result: AuditResult): void {
       title: "BypasserAI — Humanized",
       message: `${result.rewrittenFiles} file(s) rewritten before commit.`,
       type: "warning",
+    });
+  } else if (result.errorFiles > 0) {
+    notifyWindows({
+      title: "BypasserAI — Rewrite failed",
+      message: `${result.errorFiles} file(s) needed rewriting but the API call failed. Check .bypasser.log.`,
+      type: "error",
     });
   } else {
     notifyWindows({

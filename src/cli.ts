@@ -2,9 +2,9 @@
 import { install, uninstall } from "./installer.js";
 import { runAudit } from "./audit.js";
 import { detectAI, extractAddedLines, countChangedLines } from "./detector.js";
-import { getStagedFiles, matchGlob } from "./git.js";
+import { getStagedFiles, getWorkingTreeFiles, matchGlob } from "./git.js";
 import { loadConfig, resolveThreshold } from "./config.js";
-import { writeFileSync } from "fs";
+import { writeFileSync, readFileSync, existsSync, appendFileSync } from "fs";
 import { resolve } from "path";
 
 const args = process.argv.slice(2);
@@ -25,12 +25,23 @@ async function main() {
 
     case "detect": {
       const config = loadConfig(cwd);
-      const staged = getStagedFiles(cwd, config);
+      const all = flags.has("--all");
+      const staged = all
+        ? getWorkingTreeFiles(cwd, config)
+        : getStagedFiles(cwd, config);
 
       if (staged.length === 0) {
-        console.log("No staged files to analyze.");
+        console.log(
+          all
+            ? "No changed files in the working tree."
+            : "No staged files to analyze. Use --all to scan the working tree."
+        );
         break;
       }
+
+      console.log(
+        `Scanning ${staged.length} ${all ? "working-tree" : "staged"} file(s)...\n`
+      );
 
       let anyAbove = false;
       for (const file of staged) {
@@ -121,6 +132,14 @@ async function main() {
             `\n  → ${result.rewrittenFiles} file(s) rewritten. Commit will use humanized version.`
           );
         }
+        if (result.errorFiles > 0) {
+          console.error(
+            `\n  ⚠ ${result.errorFiles} file(s) needed rewriting but the API call failed.`
+          );
+          console.error(
+            `     Check the endpoint in .bypasser.json and see .bypasser.log for details.`
+          );
+        }
 
         process.exit(0);
       } catch (err: unknown) {
@@ -147,6 +166,7 @@ async function main() {
       console.log(
         "Created .bypasser.json — add your API key via BYPASSER_API_KEY env var or apiKey field."
       );
+      ensureGitignoreEntries(cwd);
       console.log('Run "bypasser install" to install the pre-commit hook.');
       break;
     }
@@ -166,6 +186,7 @@ COMMANDS
   install               Install the pre-commit git hook
   uninstall             Remove the pre-commit git hook
   detect                Score staged files and report AI signals
+  detect --all          Score changed files in the working tree (no staging needed)
   detect --verbose      Show individual signal details
   rewrite <file>        Rewrite a specific file via the API
   audit                 Detect + rewrite staged files above threshold
@@ -181,6 +202,43 @@ ENVIRONMENT VARIABLES
 DOCS
   https://github.com/pacoaldev/bypasser-ai
 `);
+}
+
+/**
+ * Ensure the tool's local artifacts are git-ignored in the host project, so a
+ * user does not accidentally commit `.bypasser.log` or `.bypasser.state.json`.
+ * Idempotent: only appends entries that are not already present.
+ */
+function ensureGitignoreEntries(cwd: string): void {
+  const wanted = [".bypasser.log", ".bypasser.state.json"];
+  const gitignorePath = resolve(cwd, ".gitignore");
+
+  let current = "";
+  if (existsSync(gitignorePath)) {
+    current = readFileSync(gitignorePath, "utf8");
+  }
+
+  const missing = wanted.filter(
+    (entry) => !current.split("\n").some((line) => line.trim() === entry)
+  );
+  if (missing.length === 0) return;
+
+  const block =
+    (current.endsWith("\n") || current === "" ? "" : "\n") +
+    "\n# bypasser-ai\n" +
+    missing.join("\n") +
+    "\n";
+
+  try {
+    if (existsSync(gitignorePath)) {
+      appendFileSync(gitignorePath, block, "utf8");
+    } else {
+      writeFileSync(gitignorePath, block.trimStart(), "utf8");
+    }
+    console.log("Added .bypasser.log / .bypasser.state.json to .gitignore.");
+  } catch {
+    // non-fatal
+  }
 }
 
 function scoreBar(score: number): string {
