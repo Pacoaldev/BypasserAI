@@ -45,23 +45,53 @@ export function notifyWindows(opts: NotifyOptions, deps: NotifyDeps = {}): void 
     type === "error" ? "Error" : type === "warning" ? "Warning" : "Information";
 
   const script = buildScript(icon);
+  const { cmd, args } = buildLaunch(script);
 
   try {
-    const child = spawnFn(
-      "powershell",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
-      {
-        // Pass payload via env — no string interpolation, no injection surface.
-        env: { ...process.env, BYPASSER_TOAST_TITLE: title, BYPASSER_TOAST_MSG: message },
-        stdio: "ignore",
-        detached: true,
-        windowsHide: true,
-      }
-    );
+    const child = spawnFn(cmd, args, {
+      // Pass payload via env — no string interpolation, no injection surface.
+      env: { ...process.env, BYPASSER_TOAST_TITLE: title, BYPASSER_TOAST_MSG: message },
+      stdio: "ignore",
+      detached: true,
+      windowsHide: true,
+    });
     child.unref();
   } catch {
     // never block the commit because of a notification
   }
+}
+
+/**
+ * Build the (command, args) pair that launches PowerShell on Windows.
+ *
+ * Windows gotcha we hit in the field: `spawn("powershell", [...], { detached:
+ * true, stdio: "ignore" })` makes PowerShell exit with code 0 **without running
+ * the script** (a known Node/Windows DETACHED_PROCESS quirk) — so the toast
+ * never appeared. Dropping `detached` is not an option either: the pre-commit
+ * hook calls `process.exit(0)` immediately, which kills a plain child before
+ * PowerShell's ~1s cold start finishes.
+ *
+ * Wrapping the launch in `cmd /c start "" /b` breaks the process out of the
+ * parent's job object so it survives the hook exiting, and `-EncodedCommand`
+ * (UTF-16LE base64) sidesteps every cmd.exe quoting/newline hazard in the
+ * multi-line script.
+ */
+export function buildLaunch(script: string): { cmd: string; args: string[] } {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return {
+    cmd: "cmd",
+    args: [
+      "/c",
+      "start",
+      "",
+      "/b",
+      "powershell",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      encoded,
+    ],
+  };
 }
 
 /**

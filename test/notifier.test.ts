@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   notifyWindows,
   buildScript,
+  buildLaunch,
   POWERSHELL_AUMID,
   _resetBurntToastCache,
   _setBurntToastAvailable,
@@ -54,30 +55,51 @@ test("notifyWindows: no-op on non-Windows platforms", () => {
   assert.equal(called, false);
 });
 
-test("notifyWindows: spawns detached powershell and returns immediately", () => {
+test("buildLaunch: uses cmd /c start so the toast survives the hook exiting", () => {
+  const { cmd, args } = buildLaunch("Write-Output hi");
+  // cmd /c start "" /b powershell ... — breaks out of the parent's job object,
+  // which is required because the hook calls process.exit(0) immediately.
+  assert.equal(cmd, "cmd");
+  assert.deepEqual(args.slice(0, 4), ["/c", "start", "", "/b"]);
+  assert.equal(args[4], "powershell");
+  // EncodedCommand avoids every cmd.exe quoting/newline hazard.
+  assert.ok(args.includes("-EncodedCommand"));
+  const encoded = args[args.length - 1];
+  const decoded = Buffer.from(encoded, "base64").toString("utf16le");
+  assert.equal(decoded, "Write-Output hi");
+});
+
+test("notifyWindows: spawns the detached launcher and returns immediately", () => {
   _resetBurntToastCache();
   let capturedCmd = "";
   let capturedArgs: string[] = [];
   let capturedEnv: NodeJS.ProcessEnv | undefined;
+  let capturedOpts: { detached?: boolean; stdio?: string } | undefined;
   let unrefCalled = false;
 
   notifyWindows(
     { title: "BypasserAI", message: "2 files rewritten" },
     {
       platform: "win32",
-      spawnFn: ((cmd: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+      spawnFn: ((
+        cmd: string,
+        args: string[],
+        opts: { env: NodeJS.ProcessEnv; detached?: boolean; stdio?: string }
+      ) => {
         capturedCmd = cmd;
         capturedArgs = args;
         capturedEnv = opts.env;
+        capturedOpts = opts;
         return { unref: () => (unrefCalled = true) } as never;
       }) as never,
     }
   );
 
-  assert.equal(capturedCmd, "powershell");
-  assert.ok(capturedArgs.includes("-Command"));
+  assert.equal(capturedCmd, "cmd");
+  assert.ok(capturedArgs.includes("-EncodedCommand"));
   assert.equal(capturedEnv?.BYPASSER_TOAST_TITLE, "BypasserAI");
   assert.equal(capturedEnv?.BYPASSER_TOAST_MSG, "2 files rewritten");
+  assert.equal(capturedOpts?.detached, true, "must detach from the hook process");
   assert.equal(unrefCalled, true, "must unref so the commit is not blocked");
 });
 
