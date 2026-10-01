@@ -50,6 +50,9 @@ export const BUILT_IN_IGNORE = [
   "*.yaml",
   "*.yml",
   "*.toml",
+  // Backups and temp files written by restageFile() — never score or commit.
+  "*.bak",
+  "*.bypasser.tmp",
 ];
 
 export function loadConfig(cwd = process.cwd()): BypasserConfig {

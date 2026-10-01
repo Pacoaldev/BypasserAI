@@ -1,5 +1,11 @@
 import { execFileSync } from "child_process";
-import { writeFileSync, readFileSync } from "fs";
+import {
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  renameSync,
+  copyFileSync,
+} from "fs";
 import { resolve } from "path";
 import { BUILT_IN_IGNORE } from "./config.js";
 import type { BypasserConfig } from "./config.js";
@@ -129,9 +135,47 @@ export function getStagedFiles(
   return result;
 }
 
-/** Re-stages a file after rewriting its content. */
+/**
+ * Re-stages a file after rewriting its content — *safely*.
+ *
+ * Safety is non-negotiable here: this is the single point where a bad rewrite
+ * could destroy a user's file. The 2026-09 incident happened exactly here — a
+ * truncated model response (2570 → 474 lines) was written straight over the
+ * original with no recovery path. This function now:
+ *
+ *   1. Refuses to write empty content over a non-empty file (a truncated
+ *      response that sanitized to "" is the most destructive possible write).
+ *   2. Copies the current on-disk content to `<path>.bak` before touching it,
+ *      so the pre-rewrite version is always recoverable.
+ *   3. Writes to a temp file and atomically renames it into place, so an
+ *      interrupted write can never leave a half-written file.
+ *
+ * Throws (rather than silently proceeding) when the write would be destructive;
+ * callers treat that as a failed rewrite and keep the commit safe.
+ */
 export function restageFile(filePath: string, newContent: string, cwd: string): void {
-  writeFileSync(resolve(cwd, filePath), newContent, "utf8");
+  const target = resolve(cwd, filePath);
+
+  // Guard 1: never blank out an existing non-empty file.
+  if (newContent.trim() === "" && existsSync(target)) {
+    const existing = readFileSync(target, "utf8");
+    if (existing.trim() !== "") {
+      throw new Error(
+        `refusing to overwrite ${filePath} with empty content (original has ${existing.split("\n").length} lines)`
+      );
+    }
+  }
+
+  // Guard 2: back up the current content before any write.
+  if (existsSync(target)) {
+    copyFileSync(target, `${target}.bak`);
+  }
+
+  // Guard 3: atomic write — temp file + rename, never a partial file on disk.
+  const tmp = `${target}.bypasser.tmp`;
+  writeFileSync(tmp, newContent, "utf8");
+  renameSync(tmp, target);
+
   git(["add", "--", filePath], cwd);
 }
 

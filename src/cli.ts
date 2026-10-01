@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { install, uninstall } from "./installer.js";
 import { runAudit } from "./audit.js";
-import { detectAI, extractAddedLines, countChangedLines } from "./detector.js";
+import { detectAI, countChangedLines } from "./detector.js";
 import { getStagedFiles, getWorkingTreeFiles, matchGlob } from "./git.js";
 import { loadConfig, resolveThreshold } from "./config.js";
 import { writeFileSync, readFileSync, existsSync, appendFileSync } from "fs";
@@ -45,13 +45,14 @@ async function main() {
 
       let anyAbove = false;
       for (const file of staged) {
-        const added = extractAddedLines(file.diff);
         const threshold = resolveThreshold(file.path, config, matchGlob);
         if (countChangedLines(file.diff) < 5) {
           console.log(`${file.path}: skipped (too few changed lines)`);
           continue;
         }
-        const result = detectAI(added, file.path);
+        // Score the full file content, not just the added diff lines — see
+        // audit.ts for why (diff-only scoring reported 0% on 100% AI files).
+        const result = detectAI(file.content, file.path);
         const pct = (result.score * 100).toFixed(0);
         const bar = scoreBar(result.score);
         const label = result.score >= threshold ? "⚠ ABOVE THRESHOLD" : "✓ ok";
@@ -210,7 +211,12 @@ DOCS
  * Idempotent: only appends entries that are not already present.
  */
 function ensureGitignoreEntries(cwd: string): void {
-  const wanted = [".bypasser.log", ".bypasser.state.json"];
+  const wanted = [
+    ".bypasser.log",
+    ".bypasser.state.json",
+    "*.bypasser.tmp",
+    "*.bak",
+  ];
   const gitignorePath = resolve(cwd, ".gitignore");
 
   let current = "";

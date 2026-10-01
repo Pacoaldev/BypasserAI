@@ -29,6 +29,117 @@ export type SignalFamily =
   | "uniformity";
 
 // ---------------------------------------------------------------------------
+// Structural helpers
+//
+// The original signal predicates were written against toy snippets and their
+// regexes never matched idiomatic real-world code:
+//   - they only recognised `const x = () =>` and missed `export async function`,
+//   - they tried to match function bodies with `[^}]` (breaks on any nesting),
+//   - they required ≥2 occurrences of things that appear once in real files.
+// The result was that 8 of the 13 signals were DEAD — they never fired on any
+// real AI-generated file. These helpers do line-based analysis instead, which
+// is far more robust across languages and styles.
+// ---------------------------------------------------------------------------
+
+/** Count function-like declarations: `function f`, `export async function f`, `const f = (` / `= async (`, arrow props. */
+function countFunctions(code: string): number {
+  const patterns = [
+    /\bfunction\s+\w+/g, // function foo, export async function foo
+    /\bconst\s+\w+\s*=\s*(?:async\s*)?\(/g, // const f = (…) =>
+    /\bconst\s+\w+\s*=\s*async\s+\w+/g, // const f = async function
+    /\b\w+\s*:\s*(?:async\s*)?\([^)]*\)\s*=>/g, // obj.method: (…) =>
+    /=>\s*[{(]/g, // any arrow body
+  ];
+  const seen = new Set<number>();
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    const r = new RegExp(re.source, re.flags);
+    while ((m = r.exec(code)) !== null) {
+      seen.add(m.index);
+      if (m.index === r.lastIndex) r.lastIndex++;
+    }
+  }
+  return seen.size;
+}
+
+/** Count arrow-function bodies specifically (`=>`, `=> {`). */
+function countArrowFunctions(code: string): number {
+  return (code.match(/=>\s*[{(]/g) ?? []).length;
+}
+
+/** Count traditional `function` declarations. */
+function countTraditionalFunctions(code: string): number {
+  return (code.match(/\bfunction\s+\w+/g) ?? []).length;
+}
+
+/** Count `catch (...) {` handlers, tolerant of whitespace and optional binding. */
+function countCatchBlocks(code: string): number {
+  return (code.match(/\bcatch\s*(?:\([^)]*\))?\s*\{/g) ?? []).length;
+}
+
+/** Count async functions (`async function f`, `async (…) =>`, `async f =>`). */
+function countAsyncFunctions(code: string): number {
+  return (
+    code.match(/\basync\s+(?:function\b|\w+\s*=>|\([^)]*\)\s*=>|\w+\s*\()/g) ?? []
+  ).length;
+}
+
+/** Count `try {` blocks. */
+function countTryBlocks(code: string): number {
+  return (code.match(/\btry\s*\{/g) ?? []).length;
+}
+
+/** Count JSDoc `/** … *\/` blocks spanning at least 3 lines. */
+function countJsDocBlocks(code: string): number {
+  return (code.match(/\/\*\*[\s\S]*?\*\//g) ?? []).length;
+}
+
+/** Non-blank line count. */
+function codeLineCount(code: string): number {
+  return code.split("\n").filter((l) => l.trim().length > 0).length;
+}
+
+/** Count lines whose only content is a line or block comment. */
+function countCommentLines(code: string): number {
+  const lines = code.split("\n");
+  let n = 0;
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.startsWith("//") || t.startsWith("/*") || t.startsWith("*") || t.startsWith("*/")) n++;
+  }
+  return n;
+}
+
+/** Count `interface X {` declarations (and TS `type X = {` payload shapes). */
+function countInterfaces(code: string): number {
+  return (code.match(/\binterface\s+\w+/g) ?? []).length;
+}
+
+/**
+ * Detect over-narration in comments: comments that restate what the very next
+ * line of code plainly does. Rather than a fixed phrase list (which real AI
+ * never matches verbatim), we look for the *pattern*: an imperative/narrative
+ * English comment starting a sentence, which is the hallmark of AI narration.
+ */
+function hasNarratingComments(code: string): boolean {
+  const lines = code.split("\n");
+  const NARRATION =
+    /^\s*(\/\/|\*)\s+(?:This|The|These|Here|Now|Then|First|Next|Finally|It|We|You|Returns?|Gets?|Sets?|Handles?|Checks?|Validates?|Initializes?|Creates?|Iterates?|Loops?|Builds?|Parses?|Reads?|Writes?|Loads?|Saves?|Fetches?|Computes?|Calculates?|Converts?|Transforms?|Processes?|Adds?|Removes?|Updates?|Skips?|Scores?|Writes?|Fires?|Wraps?|Ensures?|Marks?|Records?|Applies?|Installs?|Removes?)\b/;
+  let narrated = 0;
+  for (const line of lines) {
+    if (NARRATION.test(line)) narrated++;
+  }
+  return narrated >= 2;
+}
+
+/** Fraction of non-blank lines that are comments (JSDoc + line comments). */
+function commentRatio(code: string): number {
+  const total = codeLineCount(code);
+  if (total === 0) return 0;
+  return countCommentLines(code) / total;
+}
+
+// ---------------------------------------------------------------------------
 // Signal definitions
 // ---------------------------------------------------------------------------
 
@@ -65,13 +176,27 @@ const SIGNALS: SignalDef[] = [
   },
   {
     family: "naming",
-    description: "Over-descriptive variable names (processData, handleResult, performOperation)",
-    weight: 0.9,
+    description: "Over-descriptive variable names / verbose verb-noun helpers",
+    weight: 0.7,
     isApplicable: (_ctx) => true, // always testable
-    test: (code) =>
-      /\b(processData|handleResult|performOperation|executeTask|manageSomething|calculateResult|validateInput|transformData|fetchAndProcess)\b/.test(
-        code
-      ),
+    test: (code) => {
+      // Specific AI-favourite names.
+      if (
+        /\b(processData|handleResult|performOperation|executeTask|manageSomething|calculateResult|validateInput|transformData|fetchAndProcess)\b/.test(
+          code
+        )
+      ) {
+        return true;
+      }
+      // General pattern: many camelCase verb-noun compound identifiers. AI
+      // tends to name everything `doThingWithData`; humans use shorter names.
+      const verbose = (
+        code.match(
+          /\b(?:get|set|handle|process|create|update|delete|fetch|build|make|validate|transform|calculate|compute|initialize|generate|render|parse|format|convert|extract|apply|resolve|ensure|record|write|load|save)(?:[A-Z]\w{3,}){1,2}\b/g
+        ) ?? []
+      ).length;
+      return verbose >= 4;
+    },
   },
 
   // --- Structure ---
@@ -79,77 +204,107 @@ const SIGNALS: SignalDef[] = [
     family: "structure",
     description: "All functions use arrow syntax uniformly",
     weight: 0.6,
-    isApplicable: ({ code }) => (code.match(/(?:=>\s*[{(]|^function\s+\w+)/gm) ?? []).length >= 3,
+    isApplicable: ({ code }) => countFunctions(code) >= 3,
     test: (code) => {
-      const arrows = (code.match(/=>\s*[{(]/g) ?? []).length;
-      const traditionals = (code.match(/^function\s+\w+/gm) ?? []).length;
+      const arrows = countArrowFunctions(code);
+      const traditionals = countTraditionalFunctions(code);
+      // Uniform arrow-only style, with enough functions to be meaningful.
       return arrows >= 3 && traditionals === 0;
     },
   },
   {
     family: "structure",
     description: "Every function uses early-return pattern (no if/else variety)",
-    weight: 0.7,
+    weight: 0.6,
     isApplicable: ({ code }) => (code.match(/\breturn\b/g) ?? []).length >= 2,
     test: (code) => {
-      const earlyReturns = (code.match(/\breturn\b.*;\s*\n\s*(?:\/\/.*\n\s*)?\}/gm) ?? []).length;
+      const earlyReturns = (
+        code.match(/\breturn\b[^;]*;\s*\n\s*(?:\/\/.*\n\s*)?\}/g) ?? []
+      ).length;
       const elseBlocks = (code.match(/\belse\s*\{/g) ?? []).length;
+      // Early returns must actually outnumber else-blocks, not just be absent.
       return earlyReturns >= 2 && elseBlocks === 0;
     },
   },
   {
     family: "structure",
     description: "Complex operations compressed into single expressions",
-    weight: 0.7,
+    weight: 0.6,
     isApplicable: ({ code }) => code.includes("."),
     test: (code) => {
-      const longChains = (code.match(/\.\w+\(.*\)\.\w+\(.*\)\.\w+\(/g) ?? []).length;
-      return longChains >= 2;
+      // Chained calls two deep (a.b().c()) are extremely common in AI code and
+      // rare in hand-written code. Also count long `.map(...).filter(...)`-style
+      // single-line pipelines.
+      const chains = (code.match(/\.\w+\([^()]*\)\.\w+\(/g) ?? []).length;
+      const pipelines = (code.match(/\w+\([^()]*\)\.(?:map|filter|reduce|then|catch|forEach)\(/g) ?? [])
+        .length;
+      return chains + pipelines >= 2;
+    },
+  },
+  {
+    family: "structure",
+    description: "Dense single-line arrow bodies (implicit return everywhere)",
+    weight: 0.5,
+    isApplicable: ({ code }) => countFunctions(code) >= 3,
+    test: (code) => {
+      // `const x = (…) => expression;` on one line with no block — AI loves
+      // these uniform one-liners; humans mix in multi-line bodies.
+      const inlineArrows = (
+        code.match(/=\s*(?:async\s*)?\([^)]*\)\s*=>\s*(?!\{)[^;\n]{4,};/g) ?? []
+      ).length;
+      const blockArrows = countArrowFunctions(code);
+      return inlineArrows >= 3 && inlineArrows >= blockArrows;
     },
   },
 
   // --- Comments ---
   {
     family: "comments",
-    description: "Comments describe what the code does (obvious narration)",
+    description: "Comments narrate what the code plainly does",
     weight: 0.9,
     isApplicable: ({ code }) => /\/\/|\/\*/.test(code),
-    test: (code) =>
-      /\/\/\s*(This function|This method|Returns the|Gets the|Sets the|Handles the|Checks if|Validates|Initializes|Creates a new|Iterates|Loops through)/i.test(
-        code
-      ),
+    test: (code) => hasNarratingComments(code),
   },
   {
     family: "comments",
     description: "Every function has a JSDoc block",
     weight: 0.7,
-    isApplicable: ({ code }) => {
-      const fns = (code.match(/(?:function\s+\w+|const\s+\w+\s*=\s*(?:async\s*)?\()/g) ?? []).length;
-      return fns >= 2;
-    },
+    isApplicable: ({ code }) => countFunctions(code) >= 2,
     test: (code) => {
-      const jsdocBlocks = (code.match(/\/\*\*[\s\S]*?\*\//g) ?? []).length;
-      const functions = (
-        code.match(/(?:function\s+\w+|const\s+\w+\s*=\s*(?:async\s*)?\()/g) ?? []
-      ).length;
-      return functions >= 2 && jsdocBlocks >= functions;
+      const functions = countFunctions(code);
+      const jsdocBlocks = countJsDocBlocks(code);
+      return functions >= 2 && jsdocBlocks >= Math.ceil(functions / 2);
+    },
+  },
+  {
+    family: "comments",
+    description: "High comment density (documentation on everything)",
+    weight: 0.6,
+    isApplicable: ({ code }) => codeLineCount(code) >= 20,
+    test: (code) => {
+      // AI code tends to be over-commented relative to human code. Above ~20%
+      // comment lines in a real source file is unusually high.
+      return commentRatio(code) >= 0.2;
     },
   },
 
   // --- Error handling ---
   {
     family: "error-handling",
-    description: "Every catch block has custom error class or full logging",
+    description: "catch blocks rethrow with a custom message / full logging",
     // Good practice, not an AI tell — kept weak so it cannot flag healthy code.
-    weight: 0.45,
-    isApplicable: ({ code }) => (code.match(/catch\s*\([^)]*\)\s*\{/g) ?? []).length >= 2,
+    weight: 0.4,
+    isApplicable: ({ code }) => countCatchBlocks(code) >= 1,
     test: (code) => {
-      const catchBlocks = (code.match(/catch\s*\([^)]*\)\s*\{/g) ?? []).length;
-      if (catchBlocks < 2) return false;
-      const simpleHandlers = (
-        code.match(/catch\s*\([^)]*\)\s*\{\s*(?:console\.\w+|return null|return;)/g) ?? []
+      const catchBlocks = countCatchBlocks(code);
+      if (catchBlocks < 1) return false;
+      // A plain `catch (e) { console.error(e); }` or bare return is the human
+      // norm; AI tends to wrap everything in `throw new Error(\`...${e}\`)`.
+      const richHandlers = (
+        code.match(/catch\s*\([^)]*\)\s*\{[^}]*(?:throw new|logger\.|console\.(?:error|warn)\(|new \w*Error)/g) ??
+        []
       ).length;
-      return simpleHandlers === 0;
+      return richHandlers >= 1 && richHandlers >= catchBlocks;
     },
   },
   {
@@ -157,11 +312,10 @@ const SIGNALS: SignalDef[] = [
     description: "Every async function wrapped in try/catch",
     // Also good practice rather than an AI tell — weak on purpose.
     weight: 0.45,
-    isApplicable: ({ code }) =>
-      (code.match(/async\s+(?:function\s+\w+|\w+\s*=>|\(\w*\)\s*=>)/g) ?? []).length >= 2,
+    isApplicable: ({ code }) => countAsyncFunctions(code) >= 2,
     test: (code) => {
-      const asyncFns = (code.match(/async\s+(?:function\s+\w+|\w+\s*=>|\(\w*\)\s*=>)/g) ?? []).length;
-      const tryCatch = (code.match(/try\s*\{/g) ?? []).length;
+      const asyncFns = countAsyncFunctions(code);
+      const tryCatch = countTryBlocks(code);
       return asyncFns >= 2 && tryCatch >= asyncFns;
     },
   },
@@ -170,27 +324,31 @@ const SIGNALS: SignalDef[] = [
   {
     family: "abstraction",
     description: "All repeated logic extracted into helpers immediately",
-    weight: 0.65,
-    isApplicable: ({ code }) =>
-      (code.match(/(?:function|const)\s+\w+/g) ?? []).length >= 3,
+    weight: 0.5,
+    isApplicable: ({ code }) => countFunctions(code) >= 3,
     test: (code) => {
       const todoExtract = /TODO.*extract|TODO.*helper|TODO.*refactor/i.test(code);
-      const helpers = (code.match(/(?:function|const)\s+\w*[Hh]elper\w*/g) ?? []).length;
-      return !todoExtract && helpers >= 2;
+      const helpers = (
+        code.match(/\b(?:function|const)\s+\w*[Hh]elper\w*/g) ?? []
+      ).length;
+      // Also: a very high functions-per-line ratio suggests everything was
+      // split into small single-purpose helpers (an AI habit).
+      const fns = countFunctions(code);
+      const dense = fns / Math.max(codeLineCount(code) / 15, 1) > 1.2;
+      return !todoExtract && (helpers >= 2 || dense);
     },
   },
   {
     family: "abstraction",
-    description: "Interface defined for every small payload or inline type",
-    weight: 0.6,
-    // Applicable to TypeScript signals: either the file is .ts/.tsx (path known)
-    // or an `interface` keyword is already present in the snippet.
+    description: "Interface/type defined for every small payload",
+    weight: 0.5,
     isApplicable: ({ code, filePath }) =>
       /\binterface\b/.test(code) || isTypeScriptPath(filePath),
     test: (code) => {
-      const interfaces = (code.match(/\binterface\s+\w+/g) ?? []).length;
-      const linesOfCode = code.split("\n").filter((l) => l.trim().length > 0).length;
-      return linesOfCode > 0 && interfaces / (linesOfCode / 20) > 1.5;
+      if (!/\binterface\b/.test(code)) return false;
+      const interfaces = countInterfaces(code);
+      const linesOfCode = codeLineCount(code);
+      return linesOfCode > 0 && interfaces / Math.max(linesOfCode / 40, 1) > 1;
     },
   },
 
@@ -201,22 +359,39 @@ const SIGNALS: SignalDef[] = [
     weight: 0.5,
     isApplicable: ({ code }) => (code.match(/\b(?:const|let|var|def|func)\s+\w+/g) ?? []).length >= 4,
     test: (code) => {
-      const hasCamel = /\b[a-z][a-zA-Z0-9]+\b/.test(code);
-      const hasShort = /\b(i|j|k|n|x|y|e|ok|id|fn|cb)\b/.test(code);
-      return hasCamel && !hasShort;
+      const declarations = (code.match(/\b(?:const|let|var)\s+(\w+)/g) ?? []).map(
+        (d) => d.replace(/.*\s/, "")
+      );
+      if (declarations.length < 4) return false;
+      // Fully consistent camelCase with essentially no snake_case and nearly
+      // no single-letter locals. Allow one or two short names in a big file.
+      const camel = declarations.filter((d) => /^[a-z][a-zA-Z0-9]*$/.test(d)).length;
+      const snake = declarations.filter((d) => /_/.test(d)).length;
+      const single = declarations.filter((d) => d.length === 1).length;
+      return camel / declarations.length >= 0.9 && snake === 0 && single <= 1;
     },
   },
   {
     family: "uniformity",
     description: "All functions follow identical structural pattern",
-    weight: 0.7,
-    isApplicable: ({ code }) =>
-      (code.match(/(?:function\s+\w+|=>\s*\{)/g) ?? []).length >= 3,
+    weight: 0.6,
+    isApplicable: ({ code }) => countFunctions(code) >= 3,
     test: (code) => {
-      const fnBodies = code.match(/(?:function\s+\w+|=>\s*)\{([^}]{20,})\}/g) ?? [];
-      if (fnBodies.length < 3) return false;
-      const guardPattern = fnBodies.filter((b) => /\{\s*if\s*\(!/.test(b));
-      return guardPattern.length === fnBodies.length;
+      // Look at the first non-blank line of each function body for a repeated
+      // guard shape (`if (!x) {`) — AI applies the same guard to everything.
+      const lines = code.split("\n");
+      let bodies = 0;
+      let guarded = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const isFn =
+          /\bfunction\s+\w+|=>\s*\{|=\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{/.test(lines[i]);
+        if (!isFn) continue;
+        bodies++;
+        const next = (lines[i + 1] ?? "").trim();
+        const after = (lines[i + 2] ?? "").trim();
+        if (/^if\s*\(\s*!/.test(next) || /^if\s*\(\s*!/.test(after)) guarded++;
+      }
+      return bodies >= 3 && guarded / bodies >= 0.6;
     },
   },
 ];
@@ -241,13 +416,6 @@ const SIGNALS: SignalDef[] = [
  */
 const SCORE_REFERENCE_WEIGHT = 2.5;
 
-/**
- * Minimum total fired weight before a score is reported at all. A single weak
- * signal (e.g. only "all identifiers are descriptive") is not evidence of AI
- * authorship and would otherwise push a score above zero for clean code.
- */
-const MIN_FIRED_WEIGHT = 0.6;
-
 export function detectAI(code: string, filePath?: string): DetectorResult {
   const ctx: SignalContext = { code, filePath };
 
@@ -263,10 +431,17 @@ export function detectAI(code: string, filePath?: string): DetectorResult {
     .filter((s) => s.fired)
     .reduce((acc, s) => acc + s.weight, 0);
 
-  if (firedWeight < MIN_FIRED_WEIGHT) {
+  // No signal fired at all → genuinely nothing to report.
+  if (firedWeight === 0) {
     return { score: 0, signals };
   }
 
+  // Score a single weak signal low (~0.15) but never a flat 0. The old code
+  // forced score=0 whenever firedWeight < 0.6, which meant a real AI file that
+  // happened to trip only one weak signal reported "0% — no AI signals", i.e.
+  // the worst possible output: it reads as "this is definitely human". The
+  // saturating curve already keeps a lone weak signal well below any usable
+  // threshold, so the hard gate is unnecessary and actively harmful.
   const score = Math.min(1 - Math.exp(-firedWeight / SCORE_REFERENCE_WEIGHT), 1);
 
   return { score, signals };

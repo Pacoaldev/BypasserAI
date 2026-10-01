@@ -1,4 +1,4 @@
-import { detectAI, extractAddedLines, countChangedLines } from "./detector.js";
+import { detectAI, countChangedLines } from "./detector.js";
 import { rewriteFile } from "./rewriter.js";
 import { getStagedFiles, restageFile } from "./git.js";
 import { loadConfig, resolveThreshold } from "./config.js";
@@ -60,7 +60,6 @@ export async function runAudit(opts: {
   const results: FileAuditResult[] = [];
 
   for (const file of staged) {
-    const added = extractAddedLines(file.diff);
     const threshold = resolveThreshold(file.path, config, matchGlob);
 
     // Skip based on the *whole* change size (added + removed), not just the
@@ -77,7 +76,12 @@ export async function runAudit(opts: {
       continue;
     }
 
-    const detection = detectAI(added, file.path);
+    // Score the FULL staged content, not just the added diff lines. Scoring
+    // only the added lines was the cause of the "0% on 100% AI files" bug: an
+    // edit touching a handful of lines in a large AI-written file was scored
+    // on those few lines, which usually carry no detectable signal. The whole
+    // file is what will be committed, so the whole file is what we score.
+    const detection = detectAI(file.content, file.path);
 
     if (opts.verbose) {
       const fired = detection.signals.filter((s) => s.fired);
@@ -130,6 +134,9 @@ export async function runAudit(opts: {
       }
 
       if (res.changed) {
+        // restageFile is atomic and backs up the original; it throws rather
+        // than perform a destructive write, so a failure here keeps the
+        // original file intact.
         restageFile(file.path, res.rewritten, cwd);
         if (res.hash) recordRewrite(cwd, file.path, res.hash);
       }

@@ -57,15 +57,144 @@ const CODE_TOKENS = [
 ];
 
 /**
- * Strip markdown code fences and detect chatbot-style prose responses.
- * Returns the sanitized content and a flag indicating whether the model
- * produced an invalid (non-code) response so the caller can fall back.
+ * Below this fraction of the original line count a rewrite is treated as a
+ * silent truncation. A humanizer must not *delete* large parts of a file: a
+ * legitimate rewrite changes wording and structure but keeps essentially the
+ * same line count. 0.75 gives generous headroom for reformatting (collapsing
+ * blank lines, inlining) while still catching a token-limit cutoff, which
+ * typically lands far below it.
  */
-function sanitizeResponse(
+const TRUNCATION_LINE_RATIO = 0.75;
+
+/**
+ * Below this absolute line count we do not apply the ratio test: tiny files
+ * legitimately change size a lot, and a single line removed from a 3-line file
+ * must not be read as truncation.
+ */
+const TRUNCATION_MIN_LINES = 12;
+
+/**
+ * Detect a response that was cut off before the file was fully rewritten.
+ *
+ * This is the guard against the incident where `providers.rs` was truncated
+ * from ~2570 to 474 lines: the model hit `max_tokens`, the response passed the
+ * (then prose/token-only) sanitizer, and the truncated content was restaged
+ * over the original. Two independent conditions flag truncation:
+ *
+ *   1. Bracket imbalance — the cutoff usually lands mid-block, leaving
+ *      unbalanced `{}`/`()`/`[]` (ignoring matches inside strings/comments,
+ *      which is approximate but sufficient as a signal).
+ *   2. Line-count collapse — even a cutoff on a clean statement boundary is
+ *      caught when the result is under `TRUNCATION_LINE_RATIO` of the original.
+ *
+ * `original` is the pre-rewrite content; the ratio is only meaningful for
+ * files above `TRUNCATION_MIN_LINES`.
+ */
+export function looksTruncated(rewritten: string, original: string): boolean {
+  const originalLines = original.split("\n").length;
+  const rewrittenLines = rewritten.split("\n").length;
+
+  if (originalLines >= TRUNCATION_MIN_LINES) {
+    if (rewrittenLines < originalLines * TRUNCATION_LINE_RATIO) return true;
+  }
+
+  return hasUnbalancedBrackets(rewritten);
+}
+
+/** Rough bracket-balance check outside of string literals and line comments. */
+function hasUnbalancedBrackets(code: string): boolean {
+  const stack: string[] = [];
+  const closing: Record<string, string> = { "}": "{", ")": "(", "]": "[" };
+  const opening = new Set(["{", "(", "["]);
+
+  let inSingle = false;
+  let inDouble = false;
+  let inLineComment = false;
+  let backtick = false;
+
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    const next = code[i + 1];
+
+    if (inLineComment) {
+      if (ch === "\n") inLineComment = false;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "\\") i++;
+      else if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (backtick) {
+      if (ch === "\\") i++;
+      else if (ch === "`") backtick = false;
+      continue;
+    }
+
+    if (ch === "/" && next === "/") {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === "`") {
+      backtick = true;
+      continue;
+    }
+
+    if (opening.has(ch)) {
+      stack.push(ch);
+    } else if (ch in closing) {
+      if (stack.length === 0 || stack[stack.length - 1] !== closing[ch]) {
+        // A closer with no matching opener — structurally broken.
+        return true;
+      }
+      stack.pop();
+    }
+  }
+
+  // Anything left open means the file was cut off mid-block.
+  return stack.length > 0;
+}
+
+/**
+ * Strip markdown code fences and detect chatbot-style prose responses.
+ *
+ * Returns the sanitized content, a flag indicating whether the model produced
+ * an invalid (non-code or truncated) response, and — when invalid — the reason
+ * so the caller/log can say *why* the original was kept.
+ *
+ * `finishReason` is the OpenAI `finish_reason` for the response. When it is
+ * `"length"` the model ran out of tokens and the response is definitionally
+ * incomplete, so we reject it before any content check.
+ */
+export function sanitizeResponse(
   raw: string,
   original: string,
-  filePath: string
-): { content: string; wasInvalid: boolean } {
+  filePath: string,
+  finishReason?: string
+): { content: string; wasInvalid: boolean; reason?: "truncated" | "prose" | "no-code" } {
+  // 0. A `length` finish reason means the model was cut off mid-generation.
+  //    Never trust the content — it is missing an unknown amount of the tail.
+  if (finishReason === "length") {
+    console.warn(
+      `[bypasser] ⚠ Model hit the token limit for ${filePath} (finish_reason=length) — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "truncated" };
+  }
+
   // 1. Strip leading/trailing markdown fences (```lang … ``` or ~~~ … ~~~)
   const fenceRe = /^(?:```[\w]*|~~~[\w]*)\r?\n([\s\S]*?)(?:```|~~~)\s*$/;
   const fenceMatch = raw.trim().match(fenceRe);
@@ -89,7 +218,18 @@ function sanitizeResponse(
     console.warn(
       `[bypasser] ⚠ Model returned a non-code response for ${filePath} — keeping original.`
     );
-    return { content: original, wasInvalid: true };
+    return { content: original, wasInvalid: true, reason: hasProse ? "prose" : "no-code" };
+  }
+
+  // 4. Completeness guard — reject a response cut short even when it *looks*
+  //    like code. This is the guard that prevents the destructive truncation
+  //    of a large file (see looksTruncated).
+  if (looksTruncated(stripped, original)) {
+    console.warn(
+      `[bypasser] ⚠ Rewrite of ${filePath} looks truncated ` +
+        `(${stripped.split("\n").length} lines vs ${original.split("\n").length}) — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "truncated" };
   }
 
   return { content: stripped, wasInvalid: false };
@@ -99,6 +239,8 @@ export interface RewriteResult {
   rewritten: string;
   changed: boolean;
   sanitizerWarning?: boolean;
+  /** Why the response was rejected, when `sanitizerWarning` is set. */
+  invalidReason?: "truncated" | "prose" | "no-code";
   /** True when the content hash matched a previous successful rewrite. */
   skipped?: boolean;
   /** Content hash, exposed so callers can persist it. */
@@ -150,7 +292,13 @@ export async function rewriteFile(
   });
 
   const raw = response.choices[0]?.message?.content ?? content;
-  const { content: rewritten, wasInvalid } = sanitizeResponse(raw, content, filePath);
+  const finishReason = response.choices[0]?.finish_reason ?? undefined;
+  const { content: rewritten, wasInvalid, reason } = sanitizeResponse(
+    raw,
+    content,
+    filePath,
+    finishReason
+  );
   const changed = rewritten.trim() !== content.trim();
 
   // Only remember the hash of a *successful, non-invalid* rewrite so a failed
@@ -159,6 +307,7 @@ export async function rewriteFile(
     rewritten,
     changed,
     sanitizerWarning: wasInvalid,
+    invalidReason: wasInvalid ? reason : undefined,
     hash: wasInvalid ? undefined : contentHash(rewritten),
   };
 }
