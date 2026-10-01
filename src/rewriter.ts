@@ -259,7 +259,7 @@ export async function rewriteFile(
   options: {
     /** If this hash equals the content hash, skip the API call entirely. */
     knownHash?: string;
-    /** Per-request timeout in ms. Default 60000. */
+    /** Per-request timeout in ms. Default 120000 (large files can take >60s). */
     timeout?: number;
     /** Retries for transient API errors (429/5xx). Default 2. */
     maxRetries?: number;
@@ -275,7 +275,7 @@ export async function rewriteFile(
   const client = new OpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseURL,
-    timeout: options.timeout ?? 60000,
+    timeout: options.timeout ?? 120000,
     maxRetries: options.maxRetries ?? 2,
   });
 
@@ -284,6 +284,10 @@ export async function rewriteFile(
   const response = await client.chat.completions.create({
     model: config.model,
     max_tokens: config.maxTokens,
+    // Force non-streaming: some OpenAI-compatible routers return SSE
+    // (text/event-stream) by default for certain models. The SDK cannot parse
+    // that as a normal completion, and it never terminates cleanly.
+    stream: false,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userMessage },
