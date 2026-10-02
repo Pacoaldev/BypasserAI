@@ -1,7 +1,7 @@
 import { detectAI, countChangedLines } from "./detector.js";
 import { rewriteFile } from "./rewriter.js";
 import { getStagedFiles, restageFile } from "./git.js";
-import { loadConfig, resolveThreshold } from "./config.js";
+import { loadConfig, resolveThreshold, scaledTimeoutMs } from "./config.js";
 import { matchGlob } from "./git.js";
 import {
   writeLog,
@@ -76,6 +76,23 @@ export async function runAudit(opts: {
       continue;
     }
 
+    // Skip files above the configured size cap. A single-request rewrite of a
+    // multi-thousand-line file is slow, expensive and prone to truncation, yet
+    // small edits to huge files are common — so capping is the pragmatic
+    // default. `maxFileLines: 0` disables the cap.
+    const lineCount = file.content.split("\n").length;
+    if (config.maxFileLines > 0 && lineCount > config.maxFileLines) {
+      results.push({
+        path: file.path,
+        score: 0,
+        threshold,
+        signals: [],
+        rewritten: false,
+        skippedReason: `file too large (${lineCount} lines > maxFileLines ${config.maxFileLines})`,
+      });
+      continue;
+    }
+
     // Score the FULL staged content, not just the added diff lines. Scoring
     // only the added lines was the cause of the "0% on 100% AI files" bug: an
     // edit touching a handful of lines in a large AI-written file was scored
@@ -119,6 +136,7 @@ export async function runAudit(opts: {
     try {
       const res = await rewriteFile(file.path, file.content, config, {
         knownHash: rewriteState[file.path],
+        timeout: scaledTimeoutMs(config, lineCount),
       });
 
       if (res.skipped) {

@@ -15,6 +15,31 @@ export interface BypasserConfig {
   ignore: string[];
   /** Per-glob threshold overrides. First matching pattern wins. */
   thresholds: ThresholdRule[];
+  /**
+   * Base per-request timeout in ms for a rewrite. Large files legitimately take
+   * longer, so the effective timeout scales up with file size (see
+   * `scaledTimeoutMs`). Default 120000 (2 min).
+   */
+  timeoutMs: number;
+  /**
+   * Per-extra-1000-lines increment added to `timeoutMs`. Keeps a 500-line file
+   * on the base timeout while giving a 1500-line file real headroom.
+   * Default 30000 (30 s per extra 1000 lines).
+   */
+  timeoutPer1kLinesMs: number;
+  /**
+   * Hard ceiling on the scaled timeout in ms, so a runaway request cannot hang
+   * the commit forever. Default 600000 (10 min).
+   */
+  maxTimeoutMs: number;
+  /**
+   * Files longer than this many lines are skipped (with a log entry) instead of
+   * rewritten. Rewriting a multi-thousand-line file in one request is slow,
+   * expensive and prone to truncation — small edits to huge files are common,
+   * so skipping them is the pragmatic default. `0` disables the cap.
+   * Default 2000.
+   */
+  maxFileLines: number;
 }
 
 /** A threshold override that applies to files matching `pattern`. */
@@ -32,6 +57,10 @@ const DEFAULTS: BypasserConfig = {
   temperature: 0.4,
   ignore: [],
   thresholds: [],
+  timeoutMs: 120000,
+  timeoutPer1kLinesMs: 30000,
+  maxTimeoutMs: 600000,
+  maxFileLines: 2000,
 };
 
 /** Built-in paths that should never be rewritten. */
@@ -50,7 +79,7 @@ export const BUILT_IN_IGNORE = [
   "*.yaml",
   "*.yml",
   "*.toml",
-  // Backups and temp files written by restageFile() — never score or commit.
+  // backups and tmp files from restageFile() — skip always
   "*.bak",
   "*.bypasser.tmp",
 ];
@@ -63,8 +92,7 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     try {
       fileConfig = JSON.parse(readFileSync(configPath, "utf8"));
     } catch (err) {
-      // Don't fail silently: a malformed config silently reverting to defaults
-      // looks like "the tool does nothing". Surface it, keep running.
+      // malformed config silently reverting to defaults is confusing — surface it
       const reason = err instanceof Error ? err.message : String(err);
       console.warn(
         `[bypasser] ⚠ Could not parse .bypasser.json (${reason}) — using defaults.`
@@ -72,7 +100,7 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     }
   }
 
-  // env vars override file config
+  // env vars win over file config
   const apiKey =
     process.env.BYPASSER_API_KEY ??
     process.env.OPENAI_API_KEY ??
@@ -91,10 +119,56 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
   const ignore = fileConfig.ignore ?? DEFAULTS.ignore;
   const thresholds = normalizeThresholdRules(fileConfig.thresholds);
 
-  return { baseURL, apiKey, model, threshold, maxTokens, temperature, ignore, thresholds };
+  const timeoutMs = positiveNumber(fileConfig.timeoutMs, DEFAULTS.timeoutMs);
+  const timeoutPer1kLinesMs = nonNegativeNumber(
+    fileConfig.timeoutPer1kLinesMs,
+    DEFAULTS.timeoutPer1kLinesMs
+  );
+  const maxTimeoutMs = positiveNumber(fileConfig.maxTimeoutMs, DEFAULTS.maxTimeoutMs);
+  const maxFileLines = nonNegativeNumber(fileConfig.maxFileLines, DEFAULTS.maxFileLines);
+
+  return {
+    baseURL,
+    apiKey,
+    model,
+    threshold,
+    maxTokens,
+    temperature,
+    ignore,
+    thresholds,
+    timeoutMs,
+    timeoutPer1kLinesMs,
+    maxTimeoutMs,
+    maxFileLines,
+  };
 }
 
-/** Validate the per-glob threshold rules, dropping malformed entries. */
+function numOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function positiveNumber(value: unknown, fallback: number): number {
+  const n = numOr(value, fallback);
+  return n > 0 ? n : fallback;
+}
+
+function nonNegativeNumber(value: unknown, fallback: number): number {
+  const n = numOr(value, fallback);
+  return n >= 0 ? n : fallback;
+}
+
+/**
+ * Effective rewrite timeout for a file of `lineCount` lines.
+ * Base is `timeoutMs`; every full 1000 lines above 1000 adds `timeoutPer1kLinesMs`.
+ * Clamped to `maxTimeoutMs`.
+ */
+export function scaledTimeoutMs(config: BypasserConfig, lineCount: number): number {
+  const extraBlocks = Math.max(0, Math.floor((lineCount - 1000) / 1000));
+  const scaled = config.timeoutMs + extraBlocks * config.timeoutPer1kLinesMs;
+  return Math.min(scaled, config.maxTimeoutMs);
+}
+
+/** Drop malformed threshold rules, keep valid ones. */
 function normalizeThresholdRules(rules: unknown): ThresholdRule[] {
   if (!Array.isArray(rules)) return [];
   const out: ThresholdRule[] = [];
@@ -115,9 +189,8 @@ function normalizeThresholdRules(rules: unknown): ThresholdRule[] {
 }
 
 /**
- * Resolve the effective threshold for a given file path.
- * The first matching per-glob rule wins, otherwise the global threshold.
- * `matchGlob` is injected to avoid a config → git import cycle.
+ * First matching per-glob rule wins; falls back to global threshold.
+ * `matchGlob` injected to avoid config → git import cycle.
  */
 export function resolveThreshold(
   filePath: string,

@@ -100,7 +100,11 @@ This creates `.bypasser.json` in your project root:
   "maxTokens": 16384,
   "temperature": 0.4,
   "ignore": [],
-  "thresholds": []
+  "thresholds": [],
+  "timeoutMs": 120000,
+  "timeoutPer1kLinesMs": 30000,
+  "maxTimeoutMs": 600000,
+  "maxFileLines": 2000
 }
 ```
 
@@ -224,6 +228,12 @@ bypasser uninstall
 | `temperature` | `0.4` | Sampling temperature for the rewrite (higher = more variation) |
 | `ignore` | `[]` | Extra glob patterns to never rewrite |
 | `thresholds` | `[]` | Per-glob threshold overrides, e.g. `[{ "pattern": "src/legacy/**", "value": 0.3 }]` (first match wins) |
+| `timeoutMs` | `120000` | Base per-request timeout in ms for a rewrite |
+| `timeoutPer1kLinesMs` | `30000` | Extra ms added to the timeout for every full 1000 lines above 1000 |
+| `maxTimeoutMs` | `600000` | Hard ceiling on the scaled timeout (per request) |
+| `maxFileLines` | `2000` | Files longer than this are skipped with a log entry instead of rewritten. `0` disables the cap |
+
+> **Files longer than `maxFileLines` are skipped.** Rewriting a multi-thousand-line file in a single API request is slow, expensive and prone to token-limit truncation, while small edits to huge files are common — so capping is the pragmatic default. Raise `maxFileLines` (or set it to `0`) if you really want to humanize very large files. The effective timeout scales with file size (`timeoutMs` + 30 s per extra 1000 lines, capped at `maxTimeoutMs`) so mid-sized files get real headroom without letting a runaway request hang the commit.
 
 ### Environment variables
 
