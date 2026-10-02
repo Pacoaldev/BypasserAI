@@ -290,7 +290,14 @@ export function resolveLanguage(filePath?: string, code = ""): LanguageProfile {
  * piped string). Looks for a few unambiguous keywords before giving up.
  */
 function sniffLanguage(code: string): LanguageId {
-  if (/^\s*(?:import\s+\w+\s*\n)?\s*(?:from|def|class)\s+\w+|"""/m.test(code) && /:\s*$/m.test(code)) {
+  // Python: a `from`/`def`/`class` header or a triple-quoted string, AND a
+  // line ending in `:` (block header). The parentheses pin the intended
+  // precedence — without them `&&` binds tighter than the `|` alternation and
+  // the `:` guard would only apply to the `"""` branch.
+  const looksPythonish =
+    /^\s*(?:import\s+\w+\s*\n)?\s*(?:from|def|class)\s+\w+|"""/m.test(code) &&
+    /:\s*$/m.test(code);
+  if (looksPythonish) {
     if (/\bdef\s+\w+\s*\(|\bself\b|:$/m.test(code)) return "python";
   }
   if (/\bpackage\s+main\b|\bfunc\s+\w+\s*\(|\bgo\s+func\b/.test(code)) return "go";

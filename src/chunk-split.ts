@@ -33,8 +33,10 @@ export function splitIntoChunks(
 
   const breakLines: number[] = [1];
   for (let i = 0; i < lines.length; i++) {
+    // `i + 1 > breakLines[last]` already excludes line 1 (the seed), so this
+    // only pushes genuine top-level boundaries ahead of the current one.
     if (headerRe.test(lines[i]) && i + 1 > breakLines[breakLines.length - 1]) {
-      if (i + 1 !== 1) breakLines.push(i + 1);
+      breakLines.push(i + 1);
     }
   }
   if (breakLines[breakLines.length - 1] !== lines.length + 1) {
