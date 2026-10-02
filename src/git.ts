@@ -10,8 +10,8 @@ import { resolve } from "path";
 import { BUILT_IN_IGNORE } from "./config.js";
 import type { BypasserConfig } from "./config.js";
 import {
-  TRUNCATION_LINE_RATIO,
   TRUNCATION_MIN_LINES,
+  COMPRESSION_LINE_RATIO,
 } from "./rewrite-constants.js";
 
 export interface StagedFile {
@@ -23,7 +23,7 @@ export interface StagedFile {
 export type FileSource = "staged" | "worktree";
 
 function git(args: string[], cwd: string): string {
-  // suppress stderr — callers probe paths expected to fail (staged deletions etc)
+  // stderr suppressed — callers probe paths that may not exist (deletions, etc)
   return execFileSync("git", args, {
     cwd,
     encoding: "utf8",
@@ -54,7 +54,7 @@ export function getWorkingTreeFiles(
     .filter((f) => f.length > 0)
     .filter((f) => !shouldIgnore(f, allIgnore));
 
-  // staged+modified file can show up in both lists
+  // a staged+modified file can appear in both lists
   const unique = [...new Set(paths)];
   const result: StagedFile[] = [];
 
@@ -78,10 +78,8 @@ export function getWorkingTreeFiles(
 }
 
 function synthesizeAddedDiff(filePath: string, content: string): string {
-  const body = content
-    .split("\n")
-    .map((line) => `+${line}`)
-    .join("\n");
+  const lines = content.split("\n");
+  const body = lines.map((line) => `+${line}`).join("\n");
   return `--- /dev/null\n+++ b/${filePath}\n${body}`;
 }
 
@@ -116,7 +114,7 @@ export function getStagedFiles(
         diffsByPath.get(filePath) ??
         git(["diff", "--cached", "--", filePath], cwd);
 
-      // staged (index) version — may differ from worktree under `git add -p`
+      // index version — may differ from worktree if `git add -p` was used
       const content = git(["show", `:${filePath}`], cwd);
 
       result.push({ path: filePath, diff, content });
@@ -140,6 +138,7 @@ export function splitCachedDiffByPath(fullPatch: string): Map<string, string> {
     const filePath = m[2];
     map.set(filePath, block.trimEnd() + "\n");
   }
+
   return map;
 }
 
@@ -149,6 +148,15 @@ export function splitCachedDiffByPath(fullPatch: string): Map<string, string> {
  * 1. Refuses empty content over a non-empty file.
  * 2. Backs up current on-disk content to `<path>.bak` before any write.
  * 3. Writes to a tmp file then renames atomically.
+ *
+ * The line-count guard here is a last-resort backstop against a catastrophic
+ * write, NOT the primary truncation decision: the rewriter already ran the
+ * finish-reason-aware completeness check with full context (see
+ * `looksTruncated` in rewriter.ts). This layer only has the two strings, so it
+ * cannot tell a clean-stop compression from a cutoff — it therefore uses the
+ * severe `COMPRESSION_LINE_RATIO` floor, which still catches the original
+ * `providers.rs` disaster (~18%) but does not re-reject a legitimate rewrite
+ * that merely stripped narration down to ~40-60% of the original.
  *
  * Throws on destructive writes — caller keeps the commit safe.
  */
@@ -175,14 +183,13 @@ export function restageFile(
 
     if (
       existingLines >= TRUNCATION_MIN_LINES &&
-      newLines < existingLines * TRUNCATION_LINE_RATIO
+      newLines < existingLines * COMPRESSION_LINE_RATIO
     ) {
       throw new Error(
-        `refusing to overwrite ${filePath}: new content has ${newLines} lines vs ${existingLines} original (truncation guard)`
+        `refusing to overwrite ${filePath}: new content has ${newLines} lines vs ${existingLines} original (severe-shrink guard)`
       );
     }
 
-    // backup before touching anything
     copyFileSync(target, `${target}.bak`);
   }
 
@@ -205,5 +212,6 @@ export function matchGlob(filePath: string, pattern: string): boolean {
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*/g, ".+")
     .replace(/\*/g, "[^/]+");
-  return new RegExp(`(^|/)${escaped}($|/)`).test(filePath);
+  const rx = new RegExp(`(^|/)${escaped}($|/)`);
+  return rx.test(filePath);
 }

@@ -69,6 +69,91 @@ test("looksTruncated: unbalanced braces are flagged", () => {
   assert.equal(looksTruncated(unbalanced, original), true);
 });
 
+// ---------------------------------------------------------------------------
+// Compression vs truncation — the finish-reason-aware threshold.
+//
+// The humanizer legitimately shrinks a slop-heavy file by stripping narration
+// comments and terse docblocks; that is its whole job. The old flat 0.75 ratio
+// rejected such rewrites as "truncated" even when the model stopped cleanly and
+// the code was complete and balanced. These tests pin the distinction: a clean
+// stop tolerates real compression, but a severe collapse or a broken structure
+// is still rejected no matter what.
+// ---------------------------------------------------------------------------
+
+/** A file padded with narration so a rewrite can legitimately halve it. */
+function slopPaddedOriginal(): string {
+  const lines: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    lines.push(`// Validate input number ${i}`);
+    lines.push(`export function processItem${i}(value: number): number {`);
+    lines.push(`  // Make sure the value is present`);
+    lines.push(`  if (!value) {`);
+    lines.push(`    throw new Error("value required");`);
+    lines.push(`  }`);
+    lines.push(`  // Return the value`);
+    lines.push(`  return value;`);
+    lines.push(`}`);
+    lines.push(``);
+  }
+  return lines.join("\n") + "\n";
+}
+
+test("looksTruncated: a clean stop tolerates legitimate compression (~50%)", () => {
+  const original = slopPaddedOriginal();
+  // The humanizer drops the narration comments → roughly half the lines, but
+  // the code is complete and balanced. finish_reason=stop must accept it.
+  const compressed = original
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+  const ratio = compressed.split("\n").length / original.split("\n").length;
+  assert.ok(ratio < 0.75 && ratio > 0.4, `fixture should sit in the tolerant band, got ${ratio}`);
+  assert.equal(looksTruncated(compressed, original, "stop"), false);
+});
+
+test("looksTruncated: a severe collapse is rejected even on a clean stop", () => {
+  // A cutoff landing exactly on a statement boundary leaves balanced brackets;
+  // the low floor still catches it. 10% is far below COMPRESSION_LINE_RATIO.
+  const original = slopPaddedOriginal();
+  const tiny = original.split("\n").slice(0, Math.floor(original.split("\n").length * 0.1)).join("\n");
+  assert.equal(looksTruncated(tiny, original, "stop"), true);
+});
+
+test("looksTruncated: an unknown finish reason keeps the strict ratio", () => {
+  const original = slopPaddedOriginal();
+  const compressed = original
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+  // No finish reason → no signal from the API → strict 0.75 threshold applies,
+  // so the same content that a clean stop accepts is rejected here.
+  assert.equal(looksTruncated(compressed, original, undefined), true);
+});
+
+test("looksTruncated: unbalanced brackets reject regardless of a clean stop", () => {
+  const original = slopPaddedOriginal();
+  const compressed = original
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+  // Drop the final closing brace → structurally broken → rejected even though
+  // the finish reason is a clean stop.
+  const trimmed = compressed.trimEnd();
+  const unbalanced = trimmed.slice(0, trimmed.lastIndexOf("}")) + trimmed.slice(trimmed.lastIndexOf("}") + 1);
+  assert.equal(looksTruncated(unbalanced, original, "stop"), true);
+});
+
+test("sanitizeResponse: a clean-stop compression is accepted, not called truncated", () => {
+  const original = slopPaddedOriginal();
+  const compressed = original
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+  const result = sanitizeResponse(compressed, original, "src/items.ts", "stop");
+  assert.equal(result.wasInvalid, false, "legitimate compression must not be rejected");
+  assert.equal(result.content, compressed);
+});
+
 test("sanitizeResponse: truncated response keeps the ORIGINAL, never the cutoff", () => {
   const original = bigOriginal();
   const truncated = original.split("\n").slice(0, 60).join("\n");
@@ -110,4 +195,39 @@ test("sanitizeResponse: small file rewrite is not falsely flagged as truncated",
   const result = sanitizeResponse(rewritten, original, "src/tiny.ts", "stop");
   assert.equal(result.wasInvalid, false);
   assert.equal(result.content, rewritten);
+});
+
+// ---------------------------------------------------------------------------
+// Hallucinated path header — the model sometimes prefixes the returned body
+// with the file path it was handed (`src/git.ts`) as a bare first line. That
+// stray line is never valid code and once landed above the imports, breaking
+// the build. These tests pin the exact-match strip: only the path itself is
+// removed, real code is never touched.
+// ---------------------------------------------------------------------------
+
+test("sanitizeResponse: strips a hallucinated path header line", () => {
+  const original = "export const a = 1;\nexport const b = 2;\n";
+  const raw = "src/git.ts\nexport const a = 1;\nexport const b = 3;\n";
+  const result = sanitizeResponse(raw, original, "src/git.ts", "stop");
+  assert.equal(result.wasInvalid, false);
+  assert.equal(result.content, "export const a = 1;\nexport const b = 3;\n");
+  assert.ok(!result.content.startsWith("src/git.ts"));
+});
+
+test("sanitizeResponse: strips a `File:`-prefixed path header", () => {
+  const original = "export const a = 1;\nexport const b = 2;\n";
+  const raw = "File: src/git.ts\n\nexport const a = 1;\nexport const b = 3;\n";
+  const result = sanitizeResponse(raw, original, "src/git.ts", "stop");
+  assert.equal(result.wasInvalid, false);
+  assert.ok(!/^File:/.test(result.content));
+  assert.ok(result.content.startsWith("export const a"));
+});
+
+test("sanitizeResponse: does NOT strip a legitimate first line", () => {
+  // A normal first line that merely resembles a path must survive.
+  const original = "// module: foo\n\nexport const a = 1;\n";
+  const raw = "// module: foo\n\nexport const a = 1;\n";
+  const result = sanitizeResponse(raw, original, "src/foo.ts", "stop");
+  assert.equal(result.wasInvalid, false);
+  assert.ok(result.content.startsWith("// module: foo"));
 });

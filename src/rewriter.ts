@@ -7,6 +7,7 @@ import type { BypasserConfig, EffectiveRewriteScope } from "./config.js";
 import {
   TRUNCATION_LINE_RATIO,
   TRUNCATION_MIN_LINES,
+  COMPRESSION_LINE_RATIO,
   CHUNK_ASSEMBLY_LINE_RATIO,
 } from "./rewrite-constants.js";
 import {
@@ -86,22 +87,41 @@ const CODE_TOKENS = [
  *
  *   1. Bracket imbalance — the cutoff usually lands mid-block, leaving
  *      unbalanced `{}`/`()`/`[]` (ignoring matches inside strings/comments,
- *      which is approximate but sufficient as a signal).
- *   2. Line-count collapse — even a cutoff on a clean statement boundary is
- *      caught when the result is under `TRUNCATION_LINE_RATIO` of the original.
+ *      which is approximate but sufficient as a signal). This is the strongest
+ *      structural tell and always rejects.
+ *   2. Line-count collapse — a cutoff on a clean statement boundary leaves no
+ *      bracket imbalance, so a shrink is also suspicious.
+ *
+ * The shrink threshold depends on `finishReason`, because context matters:
+ *
+ *   - `finishReason === "length"` → the model ran out of tokens; the caller
+ *     (`sanitizeResponse`) already rejects unconditionally before this runs.
+ *   - `finishReason === "stop"` (a clean stop) → the model chose to end the
+ *     response. A balanced-but-shorter rewrite is then very likely *legitimate
+ *     compression* (the humanizer strips narration comments and terse
+ *     docblocks, so a slop-heavy file can halve in size). We only reject a
+ *     severe collapse (< `COMPRESSION_LINE_RATIO`), which is the rare cutoff
+ *     landing exactly on a statement boundary.
+ *   - any other / unknown finish reason → no signal from the API, so fall back
+ *     to the stricter `TRUNCATION_LINE_RATIO`.
  *
  * `original` is the pre-rewrite content; the ratio is only meaningful for
  * files above `TRUNCATION_MIN_LINES`.
  */
-export function looksTruncated(rewritten: string, original: string): boolean {
+export function looksTruncated(
+  rewritten: string,
+  original: string,
+  finishReason?: string
+): boolean {
+  // A structurally broken response is rejected regardless of finish reason.
+  if (hasUnbalancedBrackets(rewritten)) return true;
+
   const originalLines = original.split("\n").length;
+  if (originalLines < TRUNCATION_MIN_LINES) return false;
   const rewrittenLines = rewritten.split("\n").length;
 
-  if (originalLines >= TRUNCATION_MIN_LINES) {
-    if (rewrittenLines < originalLines * TRUNCATION_LINE_RATIO) return true;
-  }
-
-  return hasUnbalancedBrackets(rewritten);
+  const ratio = finishReason === "stop" ? COMPRESSION_LINE_RATIO : TRUNCATION_LINE_RATIO;
+  return rewrittenLines < originalLines * ratio;
 }
 
 /** Rough bracket-balance check outside of string literals and line comments. */
@@ -203,8 +223,16 @@ export function sanitizeResponse(
   const fenceMatch = raw.trim().match(fenceRe);
   const stripped = fenceMatch ? fenceMatch[1] : raw;
 
+  // 1b. Drop a hallucinated "path header". The model occasionally prefixes the
+  //     file body with the path it was given (`src/git.ts`) as a bare first
+  //     line — never valid code, and it broke the build once by landing a
+  //     stray identifier above the imports. We only strip a leading line that
+  //     *exactly* matches the file path or its basename, so real code (which
+  //     never IS the path) is untouched.
+  const withoutPathHeader = stripPathHeader(stripped, filePath);
+
   // 2. Check the first 6 non-empty lines for prose signals
-  const firstLines = stripped
+  const firstLines = withoutPathHeader
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)
@@ -215,7 +243,7 @@ export function sanitizeResponse(
   );
 
   // 3. Verify the response contains at least one recognisable code token
-  const hasCode = CODE_TOKENS.some((re) => re.test(stripped));
+  const hasCode = CODE_TOKENS.some((re) => re.test(withoutPathHeader));
 
   if (hasProse || !hasCode) {
     console.warn(
@@ -226,16 +254,42 @@ export function sanitizeResponse(
 
   // 4. Completeness guard — reject a response cut short even when it *looks*
   //    like code. This is the guard that prevents the destructive truncation
-  //    of a large file (see looksTruncated).
-  if (looksTruncated(stripped, original)) {
+  //    of a large file (see looksTruncated). `finishReason` is threaded through
+  //    so a clean stop tolerates legitimate compression while an unknown end
+  //    keeps the strict ratio.
+  if (looksTruncated(withoutPathHeader, original, finishReason)) {
     console.warn(
       `[bypasser] ⚠ Rewrite of ${filePath} looks truncated ` +
-        `(${stripped.split("\n").length} lines vs ${original.split("\n").length}) — keeping original.`
+        `(${withoutPathHeader.split("\n").length} lines vs ${original.split("\n").length}) — keeping original.`
     );
     return { content: original, wasInvalid: true, reason: "truncated" };
   }
 
-  return { content: stripped, wasInvalid: false };
+  return { content: withoutPathHeader, wasInvalid: false };
+}
+
+/**
+ * Remove a leading line that is just the file path (or its basename) — a
+ * hallucinated header the model sometimes prepends to the body it returns.
+ * Only an *exact* match is stripped, so no real first line of code is ever at
+ * risk (a valid program does not begin with its own path). Also tolerates a
+ * leading `File:` / `Path:` label on that same line.
+ */
+function stripPathHeader(code: string, filePath: string): string {
+  const lines = code.split("\n");
+  const firstIdx = lines.findIndex((l) => l.trim().length > 0);
+  if (firstIdx === -1) return code;
+
+  const line = lines[firstIdx].trim();
+  const base = filePath.split(/[\\/]/).pop() ?? filePath;
+  const candidates = new Set([filePath, base, `File: ${filePath}`, `Path: ${filePath}`]);
+
+  if (!candidates.has(line)) return code;
+
+  lines.splice(firstIdx, 1);
+  // Drop a single blank line left behind, if any.
+  if ((lines[firstIdx] ?? "").trim() === "") lines.splice(firstIdx, 1);
+  return lines.join("\n");
 }
 
 export type RewriteClient = OpenAI;
@@ -305,13 +359,20 @@ function finalizeRewrite(
   const sanitized = sanitizeResponse(raw, original, filePath, finishReason);
   if (sanitized.wasInvalid) return sanitized;
 
-  const origLines = original.split("\n").length;
-  const newLines = sanitized.content.split("\n").length;
-  if (origLines >= TRUNCATION_MIN_LINES && newLines < origLines * minLineRatio) {
-    console.warn(
-      `[bypasser] ⚠ Rewrite of ${filePath} looks truncated (${newLines} vs ${origLines} lines) — keeping original.`
-    );
-    return { content: original, wasInvalid: true, reason: "truncated" };
+  // `sanitizeResponse` already ran the completeness guard with the
+  // finish-reason-aware threshold. Only re-check when the caller requests a
+  // *stricter* ratio than that (chunk assembly, which must not shrink more
+  // than CHUNK_ASSEMBLY_LINE_RATIO across spliced fragments). Re-applying the
+  // default ratio here would re-reject legitimate compression.
+  if (minLineRatio > TRUNCATION_LINE_RATIO) {
+    const origLines = original.split("\n").length;
+    const newLines = sanitized.content.split("\n").length;
+    if (origLines >= TRUNCATION_MIN_LINES && newLines < origLines * minLineRatio) {
+      console.warn(
+        `[bypasser] ⚠ Rewrite of ${filePath} looks truncated (${newLines} vs ${origLines} lines) — keeping original.`
+      );
+      return { content: original, wasInvalid: true, reason: "truncated" };
+    }
   }
 
   const structural = applyStructuralCheck(original, sanitized.content, filePath, config);

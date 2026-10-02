@@ -54,7 +54,7 @@ test("restageFile: leaves a .bak backup of the pre-rewrite content", () => {
   }
 });
 
-test("restageFile: refuses a drastically shorter rewrite (truncation guard)", () => {
+test("restageFile: refuses a drastically shorter rewrite (severe-shrink guard)", () => {
   const dir = initRepo();
   try {
     const original = "export const x = 1;\n".repeat(30);
@@ -64,9 +64,26 @@ test("restageFile: refuses a drastically shorter rewrite (truncation guard)", ()
 
     assert.throws(
       () => restageFile("a.ts", shortened, dir),
-      /truncation guard/i
+      /severe-shrink guard/i
     );
     assert.equal(readFileSync(join(dir, "a.ts"), "utf8"), original);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("restageFile: allows a legitimate ~50% compression", () => {
+  // A humanizer legitimately halves a slop-heavy file (narration stripped).
+  // The backstop must not re-reject it: 15/30 is above the 0.4 floor.
+  const dir = initRepo();
+  try {
+    const original = "export const x = 1;\n".repeat(30);
+    writeFileSync(join(dir, "a.ts"), original);
+    execFileSync("git", ["add", "a.ts"], { cwd: dir });
+    const compressed = "export const x = 1;\n".repeat(15);
+
+    restageFile("a.ts", compressed, dir);
+    assert.equal(readFileSync(join(dir, "a.ts"), "utf8"), compressed);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
