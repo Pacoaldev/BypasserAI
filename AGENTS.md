@@ -136,6 +136,10 @@ Files at or above the effective threshold (per-glob override via `config.thresho
 
 When editing `src/rewriter.ts`, the temperature comes from `config.temperature` (default `0.4`) — low enough for consistency, high enough for variation.
 
+### Detect full file / rewrite scoped
+
+`audit.ts` always runs `detectAI` on the **full staged file** (never diff-only scoring). The rewriter chooses scope via `resolveEffectiveRewriteScope` (`file`, `diff`, `chunk`, or `auto`): full file for small sources, diff hunks with `contextLines` for large files with small edits, chunks capped by `maxChunkLines` for mostly-new large files. Parallel rewrites across **different staged files** use `rewriteConcurrency`; hunks/chunks within one file are applied bottom-up sequentially so line numbers stay valid.
+
 ### Truncation guard (never remove)
 
 A rewrite must **never** silently lose part of a file. This is a hard invariant: a model cut off at `max_tokens` produced a valid-looking response that passed the old sanitizer and was restaged over the original, destroying ~2000 lines of a file. `sanitizeResponse` therefore rejects a response when **any** of these hold, always keeping the original:

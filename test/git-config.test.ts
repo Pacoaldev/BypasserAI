@@ -38,6 +38,16 @@ function baseConfig(overrides: Partial<BypasserConfig> = {}): BypasserConfig {
     temperature: 0.4,
     ignore: [],
     thresholds: [],
+    timeoutMs: 120000,
+    timeoutPer1kLinesMs: 30000,
+    maxTimeoutMs: 600000,
+    maxFileLines: 2000,
+    rewriteConcurrency: 3,
+    rewriteScope: "auto",
+    rewriteFullFileBelowLines: 400,
+    contextLines: 60,
+    maxChunkLines: 450,
+    structuralCheck: true,
     ...overrides,
   };
 }

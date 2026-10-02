@@ -97,7 +97,10 @@ async function main() {
 
     case "audit": {
       const dryRun = flags.has("--dry-run");
-      const verbose = flags.has("--verbose") || flags.has("-v");
+      const verbose =
+        flags.has("--verbose") ||
+        flags.has("-v") ||
+        process.env.BYPASSER_VERBOSE === "1";
       const preCommit = flags.has("--pre-commit");
 
       try {
@@ -131,6 +134,11 @@ async function main() {
         if (result.rewrittenFiles > 0) {
           console.log(
             `\n  → ${result.rewrittenFiles} file(s) rewritten. Commit will use humanized version.`
+          );
+        }
+        if (result.rejectedFiles > 0) {
+          console.warn(
+            `\n  ⚠ ${result.rejectedFiles} file(s) failed safety checks — originals kept.`
           );
         }
         if (result.errorFiles > 0) {
@@ -172,6 +180,12 @@ async function main() {
         temperature: 0.4,
         ignore: [],
         thresholds: [],
+        rewriteConcurrency: 3,
+        rewriteScope: "auto",
+        rewriteFullFileBelowLines: 400,
+        contextLines: 60,
+        maxChunkLines: 450,
+        structuralCheck: true,
       };
       writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + "\n", "utf8");
       console.log(

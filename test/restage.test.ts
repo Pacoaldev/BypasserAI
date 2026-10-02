@@ -54,6 +54,24 @@ test("restageFile: leaves a .bak backup of the pre-rewrite content", () => {
   }
 });
 
+test("restageFile: refuses a drastically shorter rewrite (truncation guard)", () => {
+  const dir = initRepo();
+  try {
+    const original = "export const x = 1;\n".repeat(30);
+    writeFileSync(join(dir, "a.ts"), original);
+    execFileSync("git", ["add", "a.ts"], { cwd: dir });
+    const shortened = "export const x = 1;\n".repeat(5);
+
+    assert.throws(
+      () => restageFile("a.ts", shortened, dir),
+      /truncation guard/i
+    );
+    assert.equal(readFileSync(join(dir, "a.ts"), "utf8"), original);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("restageFile: refuses to write an empty file over a non-empty original", () => {
   const dir = initRepo();
   try {

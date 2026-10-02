@@ -35,7 +35,8 @@ test("install writes an extensionless pre-commit sh hook (git ignores .cmd)", ()
     const text = readFileSync(hook, "utf8");
     assert.match(text, /^#!\/bin\/sh/m, "hook must start with a #!/bin/sh shebang");
     assert.ok(text.includes("# bypasser-ai"), "hook must carry the ownership marker");
-    assert.match(text, /bypasser audit --pre-commit --verbose|node "\$cli" audit --pre-commit --verbose/);
+    assert.match(text, /bypasser audit --pre-commit|node "\$cli" audit --pre-commit/);
+    assert.doesNotMatch(text, /--verbose/);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

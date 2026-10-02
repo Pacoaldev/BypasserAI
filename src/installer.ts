@@ -59,10 +59,10 @@ do
 done
 
 if [ -n "$cli" ]; then
-  node "$cli" audit --pre-commit --verbose
+  node "$cli" audit --pre-commit
 else
   # Fall back to the globally installed binary on PATH (npm i -g bypasser-ai).
-  bypasser audit --pre-commit --verbose
+  bypasser audit --pre-commit
 fi
 status=$?
 

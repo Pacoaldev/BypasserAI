@@ -104,7 +104,13 @@ This creates `.bypasser.json` in your project root:
   "timeoutMs": 120000,
   "timeoutPer1kLinesMs": 30000,
   "maxTimeoutMs": 600000,
-  "maxFileLines": 2000
+  "maxFileLines": 2000,
+  "rewriteConcurrency": 3,
+  "rewriteScope": "auto",
+  "rewriteFullFileBelowLines": 400,
+  "contextLines": 60,
+  "maxChunkLines": 450,
+  "structuralCheck": true
 }
 ```
 
@@ -231,9 +237,15 @@ bypasser uninstall
 | `timeoutMs` | `120000` | Base per-request timeout in ms for a rewrite |
 | `timeoutPer1kLinesMs` | `30000` | Extra ms added to the timeout for every full 1000 lines above 1000 |
 | `maxTimeoutMs` | `600000` | Hard ceiling on the scaled timeout (per request) |
-| `maxFileLines` | `2000` | Files longer than this are skipped with a log entry instead of rewritten. `0` disables the cap |
+| `maxFileLines` | `2000` | Hard skip for **full-file** rewrites above this size. Diff/chunk modes still run for larger files when `rewriteScope` is `auto`, `diff`, or `chunk`. `0` disables the cap |
+| `rewriteConcurrency` | `3` | Parallel rewrite API calls per audit (lower if you hit rate limits) |
+| `rewriteScope` | `auto` | `file`, `diff`, `chunk`, or `auto` — how content is sent to the model |
+| `rewriteFullFileBelowLines` | `400` | In `auto`, files this size or smaller use a single full-file request |
+| `contextLines` | `60` | Padding around each diff hunk in `diff` mode |
+| `maxChunkLines` | `450` | Max lines per chunk in `chunk` mode |
+| `structuralCheck` | `true` | Reject rewrites that drop too many top-level declarations |
 
-> **Files longer than `maxFileLines` are skipped.** Rewriting a multi-thousand-line file in a single API request is slow, expensive and prone to token-limit truncation, while small edits to huge files are common — so capping is the pragmatic default. Raise `maxFileLines` (or set it to `0`) if you really want to humanize very large files. The effective timeout scales with file size (`timeoutMs` + 30 s per extra 1000 lines, capped at `maxTimeoutMs`) so mid-sized files get real headroom without letting a runaway request hang the commit.
+> **Detection always scores the full staged file** (so small edits in large AI files still count). **Rewriting** uses `rewriteScope`: small files are sent whole; large files with small diffs use hunk slices; mostly-new large files are split into chunks. Set `BYPASSER_VERBOSE=1` or `audit --verbose` for per-signal output (the pre-commit hook runs quiet by default). The effective timeout scales with file size (`timeoutMs` + 30 s per extra 1000 lines, capped at `maxTimeoutMs`).
 
 ### Environment variables
 

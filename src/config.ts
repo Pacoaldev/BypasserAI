@@ -40,7 +40,22 @@ export interface BypasserConfig {
    * Default 2000.
    */
   maxFileLines: number;
+  /** Max parallel rewrite API calls per audit. Default 3 */
+  rewriteConcurrency: number;
+  /** How to send content to the model: file, diff hunks, chunks, or auto. */
+  rewriteScope: RewriteScopeMode;
+  /** Files at or below this line count use full-file rewrite. Default 400 */
+  rewriteFullFileBelowLines: number;
+  /** Context lines around each diff hunk slice. Default 60 */
+  contextLines: number;
+  /** Max lines per chunk when rewriteScope is chunk. Default 450 */
+  maxChunkLines: number;
+  /** Reject rewrites that drop too many top-level declarations. Default true */
+  structuralCheck: boolean;
 }
+
+export type RewriteScopeMode = "file" | "diff" | "chunk" | "auto";
+export type EffectiveRewriteScope = "file" | "diff" | "chunk";
 
 /** A threshold override that applies to files matching `pattern`. */
 export interface ThresholdRule {
@@ -61,6 +76,12 @@ const DEFAULTS: BypasserConfig = {
   timeoutPer1kLinesMs: 30000,
   maxTimeoutMs: 600000,
   maxFileLines: 2000,
+  rewriteConcurrency: 3,
+  rewriteScope: "auto",
+  rewriteFullFileBelowLines: 400,
+  contextLines: 60,
+  maxChunkLines: 450,
+  structuralCheck: true,
 };
 
 /** Built-in paths that should never be rewritten. */
@@ -92,7 +113,6 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     try {
       fileConfig = JSON.parse(readFileSync(configPath, "utf8"));
     } catch (err) {
-      // malformed config silently reverting to defaults is confusing — surface it
       const reason = err instanceof Error ? err.message : String(err);
       console.warn(
         `[bypasser] ⚠ Could not parse .bypasser.json (${reason}) — using defaults.`
@@ -126,6 +146,21 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
   );
   const maxTimeoutMs = positiveNumber(fileConfig.maxTimeoutMs, DEFAULTS.maxTimeoutMs);
   const maxFileLines = nonNegativeNumber(fileConfig.maxFileLines, DEFAULTS.maxFileLines);
+  const rewriteConcurrency = positiveNumber(
+    fileConfig.rewriteConcurrency,
+    DEFAULTS.rewriteConcurrency
+  );
+  const rewriteScope = parseRewriteScope(fileConfig.rewriteScope, DEFAULTS.rewriteScope);
+  const rewriteFullFileBelowLines = nonNegativeNumber(
+    fileConfig.rewriteFullFileBelowLines,
+    DEFAULTS.rewriteFullFileBelowLines
+  );
+  const contextLines = nonNegativeNumber(fileConfig.contextLines, DEFAULTS.contextLines);
+  const maxChunkLines = positiveNumber(fileConfig.maxChunkLines, DEFAULTS.maxChunkLines);
+  const structuralCheck =
+    typeof fileConfig.structuralCheck === "boolean"
+      ? fileConfig.structuralCheck
+      : DEFAULTS.structuralCheck;
 
   return {
     baseURL,
@@ -140,7 +175,39 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     timeoutPer1kLinesMs,
     maxTimeoutMs,
     maxFileLines,
+    rewriteConcurrency,
+    rewriteScope,
+    rewriteFullFileBelowLines,
+    contextLines,
+    maxChunkLines,
+    structuralCheck,
   };
+}
+
+function parseRewriteScope(val: unknown, fallback: RewriteScopeMode): RewriteScopeMode {
+  if (val === "file" || val === "diff" || val === "chunk" || val === "auto") return val;
+  return fallback;
+}
+
+/** Pick file / diff / chunk rewrite strategy for one staged file. */
+export function resolveEffectiveRewriteScope(
+  config: BypasserConfig,
+  opts: { lineCount: number; changedLines: number; addedFraction: number }
+): EffectiveRewriteScope {
+  if (config.rewriteScope === "file") return "file";
+  if (config.rewriteScope === "diff") return "diff";
+  if (config.rewriteScope === "chunk") return "chunk";
+
+  const { lineCount, changedLines, addedFraction } = opts;
+
+  if (lineCount <= config.rewriteFullFileBelowLines) return "file";
+
+  if (addedFraction >= 0.7 || changedLines >= lineCount * 0.5) {
+    return "chunk";
+  }
+
+  // lineCount > rewriteFullFileBelowLines at this point
+  return "diff";
 }
 
 function numOr(value: unknown, fallback: number): number {
@@ -168,7 +235,6 @@ export function scaledTimeoutMs(config: BypasserConfig, lineCount: number): numb
   return Math.min(scaled, config.maxTimeoutMs);
 }
 
-/** Drop malformed threshold rules, keep valid ones. */
 function normalizeThresholdRules(rules: unknown): ThresholdRule[] {
   if (!Array.isArray(rules)) return [];
   const out: ThresholdRule[] = [];

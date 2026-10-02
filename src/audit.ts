@@ -1,15 +1,26 @@
 import { detectAI, countChangedLines } from "./detector.js";
-import { rewriteFile } from "./rewriter.js";
+import { rewriteFile, createRewriteClient, contentHash } from "./rewriter.js";
 import { getStagedFiles, restageFile } from "./git.js";
-import { loadConfig, resolveThreshold, scaledTimeoutMs } from "./config.js";
+import {
+  loadConfig,
+  resolveThreshold,
+  scaledTimeoutMs,
+  resolveEffectiveRewriteScope,
+} from "./config.js";
 import { matchGlob } from "./git.js";
 import {
   writeLog,
-  loadRewriteState,
+  loadBypasserState,
   recordRewrite,
+  recordDetection,
+  cachedDetectionScore,
 } from "./logger.js";
 import { notifyWindows } from "./notifier.js";
+import { addedLineFraction } from "./diff-hunks.js";
+import { mapPool } from "./concurrency.js";
 import type { DetectorResult } from "./detector.js";
+import type { BypasserConfig } from "./config.js";
+import type { StagedFile } from "./git.js";
 
 export interface FileAuditResult {
   path: string;
@@ -24,13 +35,21 @@ export interface AuditResult {
   files: FileAuditResult[];
   totalFiles: number;
   rewrittenFiles: number;
-  /** Files that scored above threshold but could not be rewritten (API error). */
   errorFiles: number;
+  rejectedFiles: number;
 }
 
 function scoreBar(score: number): string {
   const filled = Math.round(score * 10);
   return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]";
+}
+
+interface PendingRewrite {
+  file: StagedFile;
+  threshold: number;
+  detection: DetectorResult;
+  lineCount: number;
+  scope: ReturnType<typeof resolveEffectiveRewriteScope>;
 }
 
 /**
@@ -56,14 +75,13 @@ export async function runAudit(opts: {
   }
 
   const staged = getStagedFiles(cwd, config);
-  const rewriteState = loadRewriteState(cwd);
+  let bypasserState = loadBypasserState(cwd);
   const results: FileAuditResult[] = [];
+  const pending: PendingRewrite[] = [];
 
   for (const file of staged) {
     const threshold = resolveThreshold(file.path, config, matchGlob);
 
-    // Skip based on the *whole* change size (added + removed), not just the
-    // added lines — small edits to a large file are still worth scoring.
     if (countChangedLines(file.diff) < 5) {
       results.push({
         path: file.path,
@@ -76,12 +94,23 @@ export async function runAudit(opts: {
       continue;
     }
 
-    // Skip files above the configured size cap. A single-request rewrite of a
-    // multi-thousand-line file is slow, expensive and prone to truncation, yet
-    // small edits to huge files are common — so capping is the pragmatic
-    // default. `maxFileLines: 0` disables the cap.
     const lineCount = file.content.split("\n").length;
-    if (config.maxFileLines > 0 && lineCount > config.maxFileLines) {
+    const hash = contentHash(file.content);
+    const changedLines = countChangedLines(file.diff);
+
+    const scope = resolveEffectiveRewriteScope(config, {
+      lineCount,
+      changedLines,
+      addedFraction: addedLineFraction(file.diff, lineCount),
+    });
+
+    const overMax =
+      config.maxFileLines > 0 &&
+      lineCount > config.maxFileLines &&
+      scope !== "diff" &&
+      scope !== "chunk";
+
+    if (overMax) {
       results.push({
         path: file.path,
         score: 0,
@@ -93,12 +122,14 @@ export async function runAudit(opts: {
       continue;
     }
 
-    // Score the FULL staged content, not just the added diff lines. Scoring
-    // only the added lines was the cause of the "0% on 100% AI files" bug: an
-    // edit touching a handful of lines in a large AI-written file was scored
-    // on those few lines, which usually carry no detectable signal. The whole
-    // file is what will be committed, so the whole file is what we score.
-    const detection = detectAI(file.content, file.path);
+    let detection: DetectorResult;
+    const cachedScore = cachedDetectionScore(bypasserState, file.path, hash);
+    if (cachedScore !== undefined) {
+      detection = { score: cachedScore, signals: [] };
+    } else {
+      detection = detectAI(file.content, file.path);
+      bypasserState = recordDetection(cwd, file.path, hash, detection.score, bypasserState);
+    }
 
     if (opts.verbose) {
       const fired = detection.signals.filter((s) => s.fired);
@@ -133,68 +164,108 @@ export async function runAudit(opts: {
       continue;
     }
 
-    try {
-      const res = await rewriteFile(file.path, file.content, config, {
-        knownHash: rewriteState[file.path],
-        timeout: scaledTimeoutMs(config, lineCount),
-      });
+    pending.push({ file, threshold, detection, lineCount, scope });
+  }
 
-      if (res.skipped) {
-        results.push({
-          path: file.path,
-          score: detection.score,
-          threshold,
-          signals: detection.signals,
-          rewritten: false,
-          skippedReason: "already humanized (unchanged)",
-        });
-        continue;
+  if (pending.length > 0 && !opts.dryRun) {
+    const maxTimeout = Math.max(
+      ...pending.map((p) => scaledTimeoutMs(config, p.lineCount))
+    );
+    const client = createRewriteClient(config, maxTimeout);
+
+    const rewriteOutcomes = await mapPool(pending, config.rewriteConcurrency, (item) =>
+      processRewrite(cwd, config, client, item, bypasserState.rewrites)
+    );
+
+    for (const outcome of rewriteOutcomes) {
+      if (outcome.hash) {
+        bypasserState = recordRewrite(cwd, outcome.path, outcome.hash, bypasserState);
       }
-
-      if (res.changed) {
-        // restageFile is atomic and backs up the original; it throws rather
-        // than perform a destructive write, so a failure here keeps the
-        // original file intact.
-        restageFile(file.path, res.rewritten, cwd);
-        if (res.hash) recordRewrite(cwd, file.path, res.hash);
-      }
-
-      results.push({
-        path: file.path,
-        score: detection.score,
-        threshold,
-        signals: detection.signals,
-        rewritten: res.changed,
-      });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      console.error(`[bypasser] rewrite failed for ${file.path}: ${reason}`);
-      results.push({
-        path: file.path,
-        score: detection.score,
-        threshold,
-        signals: detection.signals,
-        rewritten: false,
-        skippedReason: `rewrite error: ${reason}`,
-      });
+      results.push(outcome.result);
     }
   }
 
   const rewrittenFiles = results.filter((r) => r.rewritten).length;
   const errorFiles = results.filter((r) => r.skippedReason?.startsWith("rewrite error")).length;
+  const rejectedFiles = results.filter((r) =>
+    r.skippedReason?.startsWith("rewrite rejected")
+  ).length;
+
   const result: AuditResult = {
     files: results,
     totalFiles: results.length,
     rewrittenFiles,
     errorFiles,
+    rejectedFiles,
   };
 
-  // --- Log + notify (non-blocking, always runs) ---
   if (results.length > 0) {
     _writeLogAndNotify(cwd, result);
   }
 
   return result;
+}
+
+async function processRewrite(
+  cwd: string,
+  config: BypasserConfig,
+  client: ReturnType<typeof createRewriteClient>,
+  item: PendingRewrite,
+  rewriteHashes: Record<string, string>
+): Promise<{ result: FileAuditResult; path: string; hash?: string }> {
+  const { file, threshold, detection, lineCount, scope } = item;
+  const base: FileAuditResult = {
+    path: file.path,
+    score: detection.score,
+    threshold,
+    signals: detection.signals,
+    rewritten: false,
+  };
+
+  try {
+    const res = await rewriteFile(file.path, file.content, config, {
+      knownHash: rewriteHashes[file.path],
+      timeout: scaledTimeoutMs(config, lineCount),
+      client,
+      scope,
+      diff: file.diff,
+    });
+
+    if (res.skipped) {
+      return {
+        path: file.path,
+        result: { ...base, skippedReason: "already humanized (unchanged)" },
+      };
+    }
+
+    if (res.sanitizerWarning) {
+      return {
+        path: file.path,
+        result: {
+          ...base,
+          skippedReason: `rewrite rejected (${res.invalidReason ?? "invalid"})`,
+        },
+      };
+    }
+
+    if (res.changed) {
+      restageFile(file.path, res.rewritten, cwd);
+      return {
+        path: file.path,
+        result: { ...base, rewritten: true },
+        hash: res.hash,
+      };
+    }
+
+    return { path: file.path, result: base };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[bypasser] rewrite failed for ${file.path}: ${reason}`);
+    return {
+      path: file.path,
+      result: { ...base, skippedReason: `rewrite error: ${reason}` },
+    };
+  }
 }
 
 function _writeLogAndNotify(cwd: string, result: AuditResult): void {
@@ -215,7 +286,6 @@ function _writeLogAndNotify(cwd: string, result: AuditResult): void {
 
     logLines.push(`  ${f.path}: ${pct}% ${bar} ${status}`);
 
-    // log fired signals for rewritten or high-score files
     if (f.rewritten || f.score >= 0.5) {
       const fired = f.signals.filter((s) => s.fired);
       fired.forEach((s) => logLines.push(`    ↳ [${s.family}] ${s.description}`));
@@ -225,14 +295,17 @@ function _writeLogAndNotify(cwd: string, result: AuditResult): void {
   if (result.rewrittenFiles > 0) {
     logLines.push(`  → ${result.rewrittenFiles} file(s) humanized and re-staged`);
   }
+  if (result.rejectedFiles > 0) {
+    logLines.push(
+      `  → ${result.rejectedFiles} file(s) rewrite rejected by safety checks — originals kept`
+    );
+  }
   if (result.errorFiles > 0) {
     logLines.push(`  → ${result.errorFiles} file(s) could NOT be rewritten (API error) — see lines above`);
   }
 
-  // write to .bypasser.log
   writeLog(cwd, logLines);
 
-  // Windows toast — fire-and-forget, never blocks the commit
   if (result.rewrittenFiles > 0) {
     notifyWindows({
       title: "BypasserAI — Humanized",
@@ -244,6 +317,12 @@ function _writeLogAndNotify(cwd: string, result: AuditResult): void {
       title: "BypasserAI — Rewrite failed",
       message: `${result.errorFiles} file(s) needed rewriting but the API call failed. Check .bypasser.log.`,
       type: "error",
+    });
+  } else if (result.rejectedFiles > 0) {
+    notifyWindows({
+      title: "BypasserAI — Rewrite rejected",
+      message: `${result.rejectedFiles} file(s) failed safety checks; originals kept.`,
+      type: "warning",
     });
   } else {
     notifyWindows({

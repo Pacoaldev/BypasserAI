@@ -3,7 +3,20 @@ import { readFileSync, existsSync } from "fs";
 import { createHash } from "crypto";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import type { BypasserConfig } from "./config.js";
+import type { BypasserConfig, EffectiveRewriteScope } from "./config.js";
+import {
+  TRUNCATION_LINE_RATIO,
+  TRUNCATION_MIN_LINES,
+  CHUNK_ASSEMBLY_LINE_RATIO,
+} from "./rewrite-constants.js";
+import {
+  parseHunkRanges,
+  mergeHunkRanges,
+  sliceWithContext,
+  spliceSlice,
+} from "./diff-hunks.js";
+import { splitIntoChunks } from "./chunk-split.js";
+import { looksStructurallyBroken } from "./rewrite-validate.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,6 +47,13 @@ Return ONLY the rewritten file content — no explanations, no markdown fences, 
 The output must be valid, compilable code in the same language as the input.
 If the code already looks human enough, return it UNCHANGED.`;
 
+const FRAGMENT_SYSTEM = `${SYSTEM_PROMPT}
+
+## Fragment mode
+You receive a **fragment** of a larger file with 1-based line numbers START–END.
+Rewrite only this fragment. Return **only** the rewritten fragment text — no fences, no path, no explanation.
+Preserve the fragment's role in the file (same exports, signatures, and control flow).`;
+
 // Prose signals that indicate the model responded as a chatbot instead of
 // returning raw code. We check the first few lines where preamble appears.
 const PROSE_SIGNALS = [
@@ -55,23 +75,6 @@ const CODE_TOKENS = [
   /\bvar\b/, /\bclass\b/, /\breturn\b/, /\bdef\b/, /\bfunc\b/,
   /^#!/, /^package\s/, /^using\s/,
 ];
-
-/**
- * Below this fraction of the original line count a rewrite is treated as a
- * silent truncation. A humanizer must not *delete* large parts of a file: a
- * legitimate rewrite changes wording and structure but keeps essentially the
- * same line count. 0.75 gives generous headroom for reformatting (collapsing
- * blank lines, inlining) while still catching a token-limit cutoff, which
- * typically lands far below it.
- */
-const TRUNCATION_LINE_RATIO = 0.75;
-
-/**
- * Below this absolute line count we do not apply the ratio test: tiny files
- * legitimately change size a lot, and a single line removed from a 3-line file
- * must not be read as truncation.
- */
-const TRUNCATION_MIN_LINES = 12;
 
 /**
  * Detect a response that was cut off before the file was fully rewritten.
@@ -235,6 +238,111 @@ export function sanitizeResponse(
   return { content: stripped, wasInvalid: false };
 }
 
+export type RewriteClient = OpenAI;
+
+export function createRewriteClient(
+  config: BypasserConfig,
+  timeoutMs: number,
+  maxRetries = 2
+): RewriteClient {
+  return new OpenAI({
+    apiKey: config.apiKey,
+    baseURL: config.baseURL,
+    timeout: timeoutMs,
+    maxRetries,
+  });
+}
+
+function applyStructuralCheck(
+  original: string,
+  candidate: string,
+  filePath: string,
+  config: BypasserConfig
+): { ok: boolean; reason?: "truncated" } {
+  if (!config.structuralCheck) return { ok: true };
+  if (looksStructurallyBroken(original, candidate, filePath)) {
+    console.warn(
+      `[bypasser] ⚠ Rewrite of ${filePath} dropped too many declarations — keeping original.`
+    );
+    return { ok: false, reason: "truncated" };
+  }
+  return { ok: true };
+}
+
+function validateAssembledFile(
+  original: string,
+  assembled: string,
+  filePath: string,
+  config: BypasserConfig,
+  minLineRatio = TRUNCATION_LINE_RATIO
+): { content: string; wasInvalid: boolean; reason?: "truncated" | "prose" | "no-code" } {
+  const oLines = original.split("\n").length;
+  const aLines = assembled.split("\n").length;
+  if (
+    looksTruncated(assembled, original) ||
+    (oLines >= TRUNCATION_MIN_LINES && aLines < oLines * minLineRatio)
+  ) {
+    console.warn(
+      `[bypasser] ⚠ Assembled rewrite of ${filePath} looks truncated (${aLines} vs ${oLines}) — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "truncated" };
+  }
+  const structural = applyStructuralCheck(original, assembled, filePath, config);
+  if (!structural.ok) {
+    return { content: original, wasInvalid: true, reason: structural.reason };
+  }
+  return { content: assembled, wasInvalid: false };
+}
+
+function finalizeRewrite(
+  original: string,
+  raw: string,
+  filePath: string,
+  finishReason: string | undefined,
+  config: BypasserConfig,
+  minLineRatio = TRUNCATION_LINE_RATIO
+): { content: string; wasInvalid: boolean; reason?: "truncated" | "prose" | "no-code" } {
+  const sanitized = sanitizeResponse(raw, original, filePath, finishReason);
+  if (sanitized.wasInvalid) return sanitized;
+
+  const origLines = original.split("\n").length;
+  const newLines = sanitized.content.split("\n").length;
+  if (origLines >= TRUNCATION_MIN_LINES && newLines < origLines * minLineRatio) {
+    console.warn(
+      `[bypasser] ⚠ Rewrite of ${filePath} looks truncated (${newLines} vs ${origLines} lines) — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "truncated" };
+  }
+
+  const structural = applyStructuralCheck(original, sanitized.content, filePath, config);
+  if (!structural.ok) {
+    return { content: original, wasInvalid: true, reason: structural.reason };
+  }
+  return sanitized;
+}
+
+async function callModel(
+  client: RewriteClient,
+  config: BypasserConfig,
+  systemPrompt: string,
+  userMessage: string
+): Promise<{ raw: string; finishReason?: string }> {
+  const response = await client.chat.completions.create({
+    model: config.model,
+    max_tokens: config.maxTokens,
+    stream: false,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+    temperature: config.temperature,
+  });
+  return {
+    raw: response.choices[0]?.message?.content ?? "",
+    finishReason: response.choices[0]?.finish_reason ?? undefined,
+  };
+}
+
 export interface RewriteResult {
   rewritten: string;
   changed: boolean;
@@ -252,61 +360,22 @@ export function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
-export async function rewriteFile(
+async function rewriteFullFile(
+  client: RewriteClient,
   filePath: string,
   content: string,
-  config: BypasserConfig,
-  options: {
-    /** If this hash equals the content hash, skip the API call entirely. */
-    knownHash?: string;
-    /** Per-request timeout in ms. Default 120000 (large files can take >60s). */
-    timeout?: number;
-    /** Retries for transient API errors (429/5xx). Default 2. */
-    maxRetries?: number;
-  } = {}
+  config: BypasserConfig
 ): Promise<RewriteResult> {
-  const hash = contentHash(content);
-
-  // Already humanized this exact content before — don't pay for it twice.
-  if (options.knownHash && options.knownHash === hash) {
-    return { rewritten: content, changed: false, skipped: true, hash };
-  }
-
-  const client = new OpenAI({
-    apiKey: config.apiKey,
-    baseURL: config.baseURL,
-    timeout: options.timeout ?? 120000,
-    maxRetries: options.maxRetries ?? 2,
-  });
-
   const userMessage = `File: ${filePath}\n\n${content}`;
-
-  const response = await client.chat.completions.create({
-    model: config.model,
-    max_tokens: config.maxTokens,
-    // Force non-streaming: some OpenAI-compatible routers return SSE
-    // (text/event-stream) by default for certain models. The SDK cannot parse
-    // that as a normal completion, and it never terminates cleanly.
-    stream: false,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userMessage },
-    ],
-    temperature: config.temperature,
-  });
-
-  const raw = response.choices[0]?.message?.content ?? content;
-  const finishReason = response.choices[0]?.finish_reason ?? undefined;
-  const { content: rewritten, wasInvalid, reason } = sanitizeResponse(
-    raw,
+  const { raw, finishReason } = await callModel(client, config, SYSTEM_PROMPT, userMessage);
+  const { content: rewritten, wasInvalid, reason } = finalizeRewrite(
     content,
+    raw || content,
     filePath,
-    finishReason
+    finishReason,
+    config
   );
   const changed = rewritten.trim() !== content.trim();
-
-  // Only remember the hash of a *successful, non-invalid* rewrite so a failed
-  // response is retried on the next commit.
   return {
     rewritten,
     changed,
@@ -314,4 +383,181 @@ export async function rewriteFile(
     invalidReason: wasInvalid ? reason : undefined,
     hash: wasInvalid ? undefined : contentHash(rewritten),
   };
+}
+
+async function rewriteByDiff(
+  client: RewriteClient,
+  filePath: string,
+  content: string,
+  diff: string,
+  config: BypasserConfig
+): Promise<RewriteResult> {
+  const ranges = mergeHunkRanges(parseHunkRanges(diff), 8).sort(
+    (a, b) => b.newStart - a.newStart
+  );
+  if (ranges.length === 0) {
+    return rewriteFullFile(client, filePath, content, config);
+  }
+
+  let working = content;
+  let anyChange = false;
+
+  for (const range of ranges) {
+    const { slice, startLine, endLine } = sliceWithContext(
+      working,
+      range,
+      config.contextLines
+    );
+    const userMessage =
+      `File: ${filePath}\nFragment lines ${startLine}-${endLine} (inclusive):\n\n${slice}`;
+    const { raw, finishReason } = await callModel(
+      client,
+      config,
+      FRAGMENT_SYSTEM,
+      userMessage
+    );
+    const sliceOriginal = working
+      .split("\n")
+      .slice(startLine - 1, endLine)
+      .join("\n");
+    const { content: newSlice, wasInvalid } = finalizeRewrite(
+      sliceOriginal,
+      raw,
+      filePath,
+      finishReason,
+      config
+    );
+    if (wasInvalid) {
+      console.warn(
+        `[bypasser] ⚠ Hunk ${startLine}-${endLine} in ${filePath} rejected — keeping original slice.`
+      );
+      continue;
+    }
+    if (newSlice.trim() !== sliceOriginal.trim()) {
+      working = spliceSlice(working, startLine, endLine, newSlice);
+      anyChange = true;
+    }
+  }
+
+  const whole = validateAssembledFile(content, working, filePath, config);
+  if (whole.wasInvalid) {
+    return {
+      rewritten: content,
+      changed: false,
+      sanitizerWarning: true,
+      invalidReason: whole.reason,
+    };
+  }
+
+  return {
+    rewritten: whole.content,
+    changed: anyChange && whole.content.trim() !== content.trim(),
+    hash: anyChange ? contentHash(whole.content) : contentHash(content),
+  };
+}
+
+async function rewriteByChunks(
+  client: RewriteClient,
+  filePath: string,
+  content: string,
+  config: BypasserConfig
+): Promise<RewriteResult> {
+  const chunks = splitIntoChunks(content, filePath, config.maxChunkLines).sort(
+    (a, b) => b.startLine - a.startLine
+  );
+  let working = content;
+  let anyChange = false;
+
+  for (const chunk of chunks) {
+    const userMessage = `File: ${filePath}\nFragment lines ${chunk.startLine}-${chunk.endLine} (inclusive):\n\n${chunk.text}`;
+    const { raw, finishReason } = await callModel(
+      client,
+      config,
+      FRAGMENT_SYSTEM,
+      userMessage
+    );
+    const sliceOriginal = working
+      .split("\n")
+      .slice(chunk.startLine - 1, chunk.endLine)
+      .join("\n");
+    const { content: newSlice, wasInvalid } = finalizeRewrite(
+      sliceOriginal,
+      raw,
+      filePath,
+      finishReason,
+      config
+    );
+    if (wasInvalid) {
+      console.warn(
+        `[bypasser] ⚠ Chunk ${chunk.startLine}-${chunk.endLine} in ${filePath} rejected — keeping original.`
+      );
+      continue;
+    }
+    if (newSlice.trim() !== sliceOriginal.trim()) {
+      working = spliceSlice(working, chunk.startLine, chunk.endLine, newSlice);
+      anyChange = true;
+    }
+  }
+
+  const whole = validateAssembledFile(
+    content,
+    working,
+    filePath,
+    config,
+    CHUNK_ASSEMBLY_LINE_RATIO
+  );
+  if (whole.wasInvalid) {
+    return {
+      rewritten: content,
+      changed: false,
+      sanitizerWarning: true,
+      invalidReason: whole.reason,
+    };
+  }
+
+  return {
+    rewritten: whole.content,
+    changed: anyChange && whole.content.trim() !== content.trim(),
+    hash: anyChange ? contentHash(whole.content) : contentHash(content),
+  };
+}
+
+export async function rewriteFile(
+  filePath: string,
+  content: string,
+  config: BypasserConfig,
+  options: {
+    knownHash?: string;
+    timeout?: number;
+    maxRetries?: number;
+    client?: RewriteClient;
+    scope?: EffectiveRewriteScope;
+    diff?: string;
+  } = {}
+): Promise<RewriteResult> {
+  const hash = contentHash(content);
+
+  if (options.knownHash && options.knownHash === hash) {
+    return { rewritten: content, changed: false, skipped: true, hash };
+  }
+
+  const client =
+    options.client ??
+    createRewriteClient(config, options.timeout ?? 120000, options.maxRetries ?? 2);
+
+  const scope = options.scope ?? "file";
+
+  let result: RewriteResult;
+  if (scope === "diff" && options.diff) {
+    result = await rewriteByDiff(client, filePath, content, options.diff, config);
+  } else if (scope === "chunk") {
+    result = await rewriteByChunks(client, filePath, content, config);
+  } else {
+    result = await rewriteFullFile(client, filePath, content, config);
+  }
+
+  if (result.hash === undefined && !result.sanitizerWarning && result.changed) {
+    result.hash = contentHash(result.rewritten);
+  }
+  return result;
 }
