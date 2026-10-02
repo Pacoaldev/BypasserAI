@@ -1,5 +1,3 @@
-src/git.ts
-
 import { execFileSync } from "child_process";
 import {
   writeFileSync,
