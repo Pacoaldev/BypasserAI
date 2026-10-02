@@ -7,7 +7,7 @@ export interface BypasserConfig {
   model: string;
   /** 0–1. Diffs scoring above this threshold are sent for rewrite. Default 0.65 */
   threshold: number;
-  /** Max tokens for the rewrite response. Default 4096 */
+  /** Max tokens for the rewrite response. Default 16384 */
   maxTokens: number;
   /** Sampling temperature for the rewrite request. Default 0.4 */
   temperature: number;
@@ -24,11 +24,11 @@ export interface ThresholdRule {
 }
 
 const DEFAULTS: BypasserConfig = {
-  baseURL: "https://api.openai.com/v1",
+  baseURL: "http://localhost:20128/v1",
   apiKey: "",
-  model: "gpt-4o",
+  model: "ag/claude-sonnet-4-6",
   threshold: 0.65,
-  maxTokens: 4096,
+  maxTokens: 16384,
   temperature: 0.4,
   ignore: [],
   thresholds: [],

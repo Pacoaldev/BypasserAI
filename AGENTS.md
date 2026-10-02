@@ -19,7 +19,7 @@ Apply `docs/SKILL.md` automatically whenever generating, editing, or refactoring
 ```
 src/cli.ts        → command router (init / install / detect / rewrite / audit)
 src/config.ts     → loads .bypasser.json and env vars (+ per-glob thresholds, temperature)
-src/detector.ts   → deterministic AI-pattern scorer (no API, six signal families)
+src/detector.ts   → deterministic AI-pattern scorer (no API, six signal families). Language-agnostic via per-language profiles (JS/TS, Python, Go, Rust, Java, C#, C/C++, Ruby, PHP).
 src/rewriter.ts   → calls OpenAI-compatible API using docs/SKILL.md as system prompt
 src/git.ts        → reads staged diff via `git show :path`, writes rewritten content back and re-stages; also `getWorkingTreeFiles()` for `detect --all`
 src/installer.ts  → writes/removes the pre-commit hook in .git/hooks/
@@ -46,8 +46,11 @@ npm run format     # prettier
 ## How to run the tool
 
 ```bash
-# Initialize config
+# Initialize config (no-op if .bypasser.json already exists)
 bypasser init
+
+# Regenerate .bypasser.json with the defaults, overwriting the existing one
+bypasser init --force
 
 # Install pre-commit hook
 bypasser install
@@ -76,15 +79,17 @@ The tool reads `.bypasser.json` at the project root. All fields are optional:
 
 ```json
 {
-  "baseURL": "https://api.openai.com/v1",
-  "model": "gpt-4o",
+  "baseURL": "http://localhost:20128/v1",
+  "model": "ag/claude-sonnet-4-6",
   "threshold": 0.65,
-  "maxTokens": 4096,
+  "maxTokens": 16384,
   "ignore": []
 }
 ```
 
 Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback.
+
+`bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates the file from the built-in defaults.
 
 Any OpenAI-compatible endpoint works: OpenAI, Ollama, LM Studio, OpenRouter, Groq, Anthropic via proxy.
 
@@ -97,21 +102,29 @@ When working on `src/detector.ts`, these are the six families and their intent:
 | Family | What it detects |
 |--------|----------------|
 | `naming` | Over-descriptive names, zero pragmatic short vars (`aux`, `tmp`, `idx`) |
-| `structure` | Uniform arrow-only syntax, identical patterns across all functions |
-| `comments` | Narration comments, JSDoc on every function |
+| `structure` | Uniform function-declaration style, early-return guards everywhere, long chains, exhaustive type annotations, lint-driven idioms |
+| `comments` | Short imperative narration comments, terse docblocks on every function |
 | `error-handling` | Exhaustive catch on every function, every async wrapped in try/catch |
-| `abstraction` | Immediate extraction of all repeated code, interface for every small type |
-| `uniformity` | Zero single-letter vars, every function block structurally identical |
+| `abstraction` | Immediate extraction of all repeated code, a named payload type for every small shape |
+| `uniformity` | Zero single-letter vars, every function block structurally identical, uniform JSX/Tailwind markup, exhaustive React hooks |
 
-Each signal has a `weight` (0–1), a `test(code)` predicate, and an `isApplicable(ctx)` predicate. The final score maps the **fired** weight through a saturating curve `1 - e^(-w / 2.5)`, clamped to [0, 1]. A score of exactly 0 is returned **only** when no signal fires at all.
+Each signal has a `weight` (0–1), a `test(ctx)` predicate, and an `isApplicable(ctx)` predicate. The final score maps the **fired** weight through a saturating curve `1 - e^(-w / 2.5)`, clamped to [0, 1]. A score of exactly 0 is returned **only** when no signal fires at all.
 
-> Why not `firedWeight / applicableWeight`? AI code fires a *correlated cluster* of signals, not all of them, so a plain ratio caps around 0.45 — below any usable threshold, which meant nothing ever got rewritten. The saturating curve puts realistic AI code at 70–85% and clean code under ~35%. Do not "fix" it back to a ratio.
+> Why not `firedWeight / applicableWeight`? AI code fires a *correlated cluster* of signals, not all of them, so a plain ratio caps around 0.45 — below any usable threshold, which meant nothing ever got rewritten. The saturating curve puts realistic AI code at 70–85% and clean code under ~50%. Do not "fix" it back to a ratio.
 
 > **Never hard-zero a non-zero fired weight.** An earlier `MIN_FIRED_WEIGHT = 0.6` gate forced the score to a literal 0 whenever the fired weight was below 0.6. That meant a real AI file tripping a single weak signal reported `0% — no AI signals`, which reads as "confirmed human" — the worst possible output. The saturating curve already keeps a lone weak signal near ~0.15 (well below threshold); let it do that instead of forcing 0.
 
-### Calibration (do not regress)
+### Language-agnostic calibration (do not regress)
 
-Every `test`/`isApplicable` predicate must be written against **idiomatic real-world code**, not toy snippets. The original predicates only matched `const x = () =>` and missed `export async function`, tried to match function bodies with `[^}]` (breaks on nesting), and required ≥2 occurrences of things that appear once in real files — the result was that **8 of 13 signals never fired on any real AI file**. Use the line-based helpers (`countFunctions`, `countCatchBlocks`, `countJsDocBlocks`, `hasNarratingComments`, …) rather than fragile multi-line regexes. `test/detector.test.ts` locks this with fixtures shaped like real repo files (`REAL_IDIOMATIC_AI`, `REALISTIC_AI_TS`) plus a hand-written human counter-example that must stay below threshold.
+The detector must recognise idiomatic AI code in **every** language, not just JavaScript. Original helpers only matched `function`/`const x =`/`=>`/`/** */`, so on Python a real AI file tripped **zero** signals and scored 0% — the exact "Cursor says 100% AI, bypasser says 0%" failure. The fix is a `LanguageProfile` layer: `resolveLanguage(filePath, code)` maps an extension (or sniffs the source) to a profile that knows how the language spells function declarations, doc comments, variable declarations, guards, etc. **A signal must never hard-code a single language's syntax — always read from the resolved profile.**
+
+Rules for tuning `test`/`isApplicable`:
+
+- Write predicates against **idiomatic real-world code**, not toy snippets. `test/detector.test.ts` locks this with fixtures shaped like real repo files (`REAL_IDIOMATIC_AI`, `REALISTIC_AI_TS`, `REALISTIC_AI_PYTHON`, `HUMAN_DOCUMENTED_PHP`).
+- Keep the **human counter-examples below threshold**: `HUMAN_DOCUMENTED_PHP` (a Laravel model with substantive docblocks) and the hand-written terse-code fixtures must stay under 0.65. A well-documented human codebase is *not* AI slop.
+- Docblocks are only an AI tell when they are **terse** (≤2 content lines, no `@param`/`Args:` annotations). Informative multi-line docblocks — the norm in Laravel, JSDoc-heavy TS, and NumPy-docstring Python — must not be flagged. See `terseDocBlockRatio`.
+- Do not count a class-based file's **primary class** as a "payload type" (`countTypeDeclarations` subtracts the main class); otherwise every short human class looks like an AI payload shape.
+- A `catch`/`recover` handler or a single `void promise` is legitimate on its own; these are deliberately weak or cluster-gated so they never flag healthy human code alone.
 
 Files at or above the effective threshold (per-glob override via `config.thresholds`, else `config.threshold`, default 0.65) are sent for rewriting.
 

@@ -83,14 +83,21 @@ cd my-project
 bypasser init
 ```
 
+> If `.bypasser.json` already exists, `bypasser init` leaves it untouched — it never overwrites an existing config (so you can't lose an `apiKey` or hand-tuned settings by re-running it). Pass `--force` to regenerate the defaults:
+>
+> ```bash
+> bypasser init --force
+> ```
+
+
 This creates `.bypasser.json` in your project root:
 
 ```json
 {
-  "baseURL": "https://api.openai.com/v1",
-  "model": "gpt-4o",
+  "baseURL": "http://localhost:20128/v1",
+  "model": "ag/claude-sonnet-4-6",
   "threshold": 0.65,
-  "maxTokens": 4096,
+  "maxTokens": 16384,
   "temperature": 0.4,
   "ignore": [],
   "thresholds": []
@@ -171,6 +178,12 @@ bypasser-ai — 2 file(s) scanned
 You can also run the tool manually at any time:
 
 ```bash
+# Create .bypasser.json (skips if it already exists)
+bypasser init
+
+# Overwrite an existing .bypasser.json with the defaults
+bypasser init --force
+
 # Check staged files without touching anything
 bypasser detect
 
@@ -204,10 +217,10 @@ bypasser uninstall
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `baseURL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
-| `model` | `gpt-4o` | Model name for your provider |
+| `baseURL` | `http://localhost:20128/v1` | Any OpenAI-compatible endpoint |
+| `model` | `ag/claude-sonnet-4-6` | Model name for your provider |
 | `threshold` | `0.65` | Score (0–1) above which rewrite triggers |
-| `maxTokens` | `4096` | Max tokens for rewrite response |
+| `maxTokens` | `16384` | Max tokens for rewrite response |
 | `temperature` | `0.4` | Sampling temperature for the rewrite (higher = more variation) |
 | `ignore` | `[]` | Extra glob patterns to never rewrite |
 | `thresholds` | `[]` | Per-glob threshold overrides, e.g. `[{ "pattern": "src/legacy/**", "value": 0.3 }]` (first match wins) |
@@ -242,9 +255,10 @@ Anything that speaks the OpenAI chat completions protocol works:
 ```json
 {
   "baseURL": "http://localhost:20128/v1",
-  "model": "cbai/deepseek-v4.1-flash",
+  "model": "ag/claude-sonnet-4-6",
   "threshold": 0.65,
-  "maxTokens": 4096,
+  "maxTokens": 16384,
+  "temperature": 0.4,
   "ignore": []
 }
 ```
@@ -270,12 +284,20 @@ comments + uniformity) and maps their combined weight through a saturating
 curve (`1 - e^(-w/2.5)`). This matters: AI-generated code rarely trips *every*
 signal, so a plain "fired ÷ total" ratio would cap around 45% and never reach a
 usable threshold. With the saturating curve, textbook AI code lands in the
-**70–85%** band while ordinary human code stays **below ~35%**. The default
+**70–85%** band while ordinary human code stays **below ~50%**. The default
 threshold is `0.65`.
 
-Because a single weak signal (descriptive names, a `try/catch`) is good
-practice rather than proof of AI authorship, the score is clamped to 0 until at
-least `0.6` total signal weight has fired.
+A lone weak signal (descriptive names, a `try/catch`) is good practice rather
+than proof of AI authorship — the curve already keeps it near ~0.15, well below
+any usable threshold. The score is only a literal `0` when **no** signal fires
+at all.
+
+> **Language-agnostic by design.** The detector resolves a language profile from
+> the file extension (JS/TS, Python, Go, Rust, Java, C#, C/C++, Ruby, PHP — with
+> source-sniffing fallback). Every signal reads from that profile, so a 100%-AI
+> Python file scores like a 100%-AI TypeScript one. This fixed the original
+> bug where the detector only understood JavaScript syntax and reported **0%**
+> on real AI Python/Go/Rust files, so they were never humanized.
 
 ---
 
@@ -285,12 +307,18 @@ The detector scores six signal families without calling any API:
 
 | Family | What triggers it |
 |--------|-----------------|
-| **Naming** | All variables fully descriptive, no `aux`/`tmp`/`idx`; names like `processData`, `handleResult` |
-| **Structure** | 100% uniform arrow functions; identical patterns across all functions; long method chains |
-| **Comments** | Narration comments (`// This function validates...`); JSDoc on every single function |
+| **Naming** | All variables fully descriptive, no `aux`/`tmp`/`idx`; names like `processData`, `process_data` |
+| **Structure** | Uniform function-declaration style; early-return guards everywhere; long method chains; exhaustive type annotations; lint-driven idioms (`void promise`, `x instanceof Error ? e.message`) |
+| **Comments** | Short imperative narration (`// Validate the input`); *terse* docblocks on nearly every function |
 | **Error handling** | Every `catch` with custom error class; every async function wrapped in `try/catch` |
-| **Abstraction** | All repeated logic immediately extracted; interface defined for every small inline type |
-| **Uniformity** | Zero short variable names; every function block structurally identical |
+| **Abstraction** | All repeated logic immediately extracted; a named type/payload for every small shape |
+| **Uniformity** | Zero short variable names; every function block structurally identical; uniform JSX/Tailwind markup; exhaustive React hooks |
+
+> Documentation is **not** penalised when it is genuinely informative: a
+> docblock carrying `@param`/`@returns`/`Args:` annotations, or multi-line
+> rationale explaining *why*, is treated as human. Only terse, restating
+> docblocks on nearly every function are an AI tell — which is what keeps
+> well-documented human codebases (Laravel, JSDoc-heavy TS) safe.
 
 ---
 
@@ -300,7 +328,9 @@ The detector scores six signal families without calling any API:
 src/
   cli.ts        Entry point, command router
   config.ts     Config loader (.bypasser.json + env vars)
-  detector.ts   Deterministic AI-pattern scorer (no API)
+  detector.ts   Deterministic AI-pattern scorer (no API). Language-agnostic:
+                resolves a per-language profile (JS/TS, Python, Go, Rust, Java,
+                C#, C/C++, Ruby, PHP) and scores a cluster of weighted signals.
   rewriter.ts   OpenAI-compatible API client + humanizer prompt + response sanitizer
   git.ts        Staged diff reader + file restager
   installer.ts  Pre-commit hook writer/remover

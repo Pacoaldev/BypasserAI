@@ -153,16 +153,26 @@ async function main() {
     }
     case "init": {
       // create a default .bypasser.json in the project
+      const configPath = resolve(cwd, ".bypasser.json");
+
+      // Guard: never clobber an existing config (it may hold an apiKey or
+      // hand-tuned ignore/thresholds). Only regenerate with --force.
+      if (existsSync(configPath) && !flags.has("--force")) {
+        console.log(
+          ".bypasser.json already exists — leaving it untouched. Use `bypasser init --force` to regenerate it."
+        );
+        break;
+      }
+
       const defaultConfig = {
-        baseURL: "https://api.openai.com/v1",
-        model: "gpt-4o",
+        baseURL: "http://localhost:20128/v1",
+        model: "ag/claude-sonnet-4-6",
         threshold: 0.65,
-        maxTokens: 4096,
+        maxTokens: 16384,
         temperature: 0.4,
         ignore: [],
         thresholds: [],
       };
-      const configPath = resolve(cwd, ".bypasser.json");
       writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + "\n", "utf8");
       console.log(
         "Created .bypasser.json — add your API key via BYPASSER_API_KEY env var or apiKey field."
@@ -184,6 +194,7 @@ bypasser-ai — AI code pattern detector & humanizer
 
 COMMANDS
   init                  Create a default .bypasser.json config
+  init --force          Overwrite an existing .bypasser.json
   install               Install the pre-commit git hook
   uninstall             Remove the pre-commit git hook
   detect                Score staged files and report AI signals
@@ -197,8 +208,8 @@ COMMANDS
 ENVIRONMENT VARIABLES
   BYPASSER_API_KEY      API key (overrides .bypasser.json)
   OPENAI_API_KEY        Fallback API key
-  BYPASSER_BASE_URL     API base URL (default: https://api.openai.com/v1)
-  BYPASSER_MODEL        Model name (default: gpt-4o)
+  BYPASSER_BASE_URL     API base URL (default: http://localhost:20128/v1)
+  BYPASSER_MODEL        Model name (default: ag/claude-sonnet-4-6)
 
 DOCS
   https://github.com/pacoaldev/bypasser-ai
