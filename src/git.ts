@@ -197,7 +197,63 @@ export function restageFile(
   writeFileSync(tmp, newContent, "utf8");
   renameSync(tmp, target);
 
-  git(["add", "--", filePath], cwd);
+  try {
+    gitAddWithRetry(filePath, cwd);
+  } catch (err) {
+    // Last-resort: keep the commit safe. A failed `git add` (transient Windows
+    // file locks held by antivirus/indexer while git is mid-commit, or a stale
+    // index.lock) must not leave a corrupted, un-staged rewrite on disk. Roll
+    // the worktree back to the most recent good content so the next attempt
+    // starts from a known-good state.
+    const reason = err instanceof Error ? err.message : String(err);
+    restoreBackup(target, cwd);
+    throw new Error(`git add failed for ${filePath}: ${reason}`);
+  }
+}
+
+/**
+ * `git add` with bounded retries. Windows holds transient locks on a file
+ * right after it is written (Defender/indexer) and git may briefly collide
+ * with the repository index lock while a commit hook is running. Both clear
+ * within a few hundred milliseconds, so retry with exponential backoff before
+ * giving up.
+ */
+function gitAddWithRetry(filePath: string, cwd: string, attempts = 5): void {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      git(["add", "--", filePath], cwd);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const delayMs = 50 * 2 ** i;
+      sleepSync(delayMs);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+function sleepSync(ms: number): void {
+  const shared = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(shared), 0, 0, ms);
+}
+
+/**
+ * Restore `<target>.bak` over the worktree file when it exists, so a failed
+ * re-stage never leaves a half-written rewrite behind. Best-effort.
+ */
+function restoreBackup(target: string, cwd: string): void {
+  const bak = `${target}.bak`;
+  try {
+    if (existsSync(bak)) {
+      copyFileSync(bak, target);
+      // Re-stage the restored original so the index matches the worktree again.
+      const rel = target.slice(resolve(cwd).length + 1).replace(/\\/g, "/");
+      gitOrNull(["add", "--", rel], cwd);
+    }
+  } catch {
+    // best-effort — the backup file remains on disk for manual recovery
+  }
 }
 
 export function shouldIgnore(filePath: string, patterns: string[]): boolean {

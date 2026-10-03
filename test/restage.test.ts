@@ -89,6 +89,31 @@ test("restageFile: allows a legitimate ~50% compression", () => {
   }
 });
 
+test("restageFile: rolls back the worktree when re-staging fails", () => {
+  // A failed `git add` (transient Windows file lock, stale index.lock) must not
+  // leave the rewritten — possibly corrupt — content on disk. The original is
+  // restored from the .bak so a later attempt starts from a known-good state.
+  const dir = initRepo();
+  try {
+    const original = "export const original = 1;\n";
+    writeFileSync(join(dir, "a.ts"), original);
+    execFileSync("git", ["add", "a.ts"], { cwd: dir });
+
+    // Force every `git add` in this run to fail with a stale index lock.
+    writeFileSync(join(dir, ".git", "index.lock"), "");
+
+    assert.throws(
+      () => restageFile("a.ts", "export const corrupt = 9;\n", dir),
+      /git add failed/i
+    );
+
+    // The worktree must be back to the original, not the corrupt rewrite.
+    assert.equal(readFileSync(join(dir, "a.ts"), "utf8"), original);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("restageFile: refuses to write an empty file over a non-empty original", () => {
   const dir = initRepo();
   try {
