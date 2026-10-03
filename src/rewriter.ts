@@ -17,9 +17,18 @@ import {
   spliceSlice,
 } from "./diff-hunks.js";
 import { splitIntoChunks } from "./chunk-split.js";
-import { looksStructurallyBroken } from "./rewrite-validate.js";
+import { looksIndentBroken, looksStructurallyBroken } from "./rewrite-validate.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Why a model response was rejected and the original kept:
+ *  - `truncated` — cut off / collapsed (token limit or lost tail)
+ *  - `prose`     — chatbot preamble instead of raw code
+ *  - `no-code`   — no recognisable code token
+ *  - `indent`    — tokens are right but leading whitespace was flattened
+ */
+export type InvalidReason = "truncated" | "prose" | "no-code" | "indent";
 
 // Load the humanizer skill prompt from docs/SKILL.md
 function loadSkillPrompt(): string {
@@ -208,7 +217,7 @@ export function sanitizeResponse(
   original: string,
   filePath: string,
   finishReason?: string
-): { content: string; wasInvalid: boolean; reason?: "truncated" | "prose" | "no-code" } {
+): { content: string; wasInvalid: boolean; reason?: InvalidReason } {
   // 0. A `length` finish reason means the model was cut off mid-generation.
   //    Never trust the content — it is missing an unknown amount of the tail.
   if (finishReason === "length") {
@@ -329,7 +338,7 @@ function validateAssembledFile(
   filePath: string,
   config: BypasserConfig,
   minLineRatio = TRUNCATION_LINE_RATIO
-): { content: string; wasInvalid: boolean; reason?: "truncated" | "prose" | "no-code" } {
+): { content: string; wasInvalid: boolean; reason?: InvalidReason } {
   const oLines = original.split("\n").length;
   const aLines = assembled.split("\n").length;
   if (
@@ -340,6 +349,14 @@ function validateAssembledFile(
       `[bypasser] ⚠ Assembled rewrite of ${filePath} looks truncated (${aLines} vs ${oLines}) — keeping original.`
     );
     return { content: original, wasInvalid: true, reason: "truncated" };
+  }
+  // Backstop: a chunk assembly that flattens the file's indentation is rejected
+  // as a whole even if each slice passed its own guard.
+  if (looksIndentBroken(original, assembled)) {
+    console.warn(
+      `[bypasser] ⚠ Assembled rewrite of ${filePath} destroyed indentation — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "indent" };
   }
   const structural = applyStructuralCheck(original, assembled, filePath, config);
   if (!structural.ok) {
@@ -355,7 +372,7 @@ function finalizeRewrite(
   finishReason: string | undefined,
   config: BypasserConfig,
   minLineRatio = TRUNCATION_LINE_RATIO
-): { content: string; wasInvalid: boolean; reason?: "truncated" | "prose" | "no-code" } {
+): { content: string; wasInvalid: boolean; reason?: InvalidReason } {
   const sanitized = sanitizeResponse(raw, original, filePath, finishReason);
   if (sanitized.wasInvalid) return sanitized;
 
@@ -373,6 +390,16 @@ function finalizeRewrite(
       );
       return { content: original, wasInvalid: true, reason: "truncated" };
     }
+  }
+
+  // Fragment-level indentation guard: a slice whose leading whitespace was
+  // flattened is rejected so the caller keeps the original lines for that
+  // range instead of splicing in mis-indented code.
+  if (looksIndentBroken(original, sanitized.content)) {
+    console.warn(
+      `[bypasser] ⚠ Rewrite of ${filePath} destroyed indentation — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "indent" };
   }
 
   const structural = applyStructuralCheck(original, sanitized.content, filePath, config);
@@ -409,7 +436,7 @@ export interface RewriteResult {
   changed: boolean;
   sanitizerWarning?: boolean;
   /** Why the response was rejected, when `sanitizerWarning` is set. */
-  invalidReason?: "truncated" | "prose" | "no-code";
+  invalidReason?: InvalidReason;
   /** True when the content hash matched a previous successful rewrite. */
   skipped?: boolean;
   /** Content hash, exposed so callers can persist it. */

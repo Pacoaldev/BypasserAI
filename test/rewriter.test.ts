@@ -1,6 +1,36 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeResponse, looksTruncated } from "../src/rewriter.js";
+import { sanitizeResponse, looksTruncated, rewriteFile } from "../src/rewriter.js";
+import type { RewriteClient } from "../src/rewriter.js";
+
+/** Minimal mock client that returns a fixed completion for the next call. */
+function mockClient(contents: string[]): RewriteClient {
+  let i = 0;
+  return {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [
+            {
+              message: { content: contents[Math.min(i++, contents.length - 1)] },
+              finish_reason: "stop",
+            },
+          ],
+        }),
+      },
+    },
+  } as unknown as RewriteClient;
+}
+
+const configStub = {
+  model: "test",
+  maxTokens: 4096,
+  temperature: 0,
+  maxChunkLines: 450,
+  contextLines: 20,
+  structuralCheck: true,
+  rewriteScope: "file",
+} as unknown as Parameters<typeof rewriteFile>[2];
 
 // ---------------------------------------------------------------------------
 // Regression suite for the destructive-truncation incident.
@@ -230,4 +260,57 @@ test("sanitizeResponse: does NOT strip a legitimate first line", () => {
   const result = sanitizeResponse(raw, original, "src/foo.ts", "stop");
   assert.equal(result.wasInvalid, false);
   assert.ok(result.content.startsWith("// module: foo"));
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end: the indentation guard wired into rewriteFile must reject a
+// flattened rewrite and keep the original.
+// ---------------------------------------------------------------------------
+
+const INDENTED_ORIGINAL = [
+  "export function run() {",
+  "  const a = 1;",
+  "  if (a) {",
+  "    console.log(a);",
+  "  }",
+  "  return a;",
+  "}",
+].join("\n");
+
+test("rewriteFile: rejects a flattened rewrite and keeps the original", async () => {
+  const flattened = [
+    "export function run() {",
+    "const a = 1;",
+    "if (a) {",
+    "console.log(a);",
+    "}",
+    "return a;",
+    "}",
+  ].join("\n");
+  const res = await rewriteFile("src/x.ts", INDENTED_ORIGINAL, configStub, {
+    client: mockClient([flattened]),
+    scope: "file",
+  });
+  assert.equal(res.changed, false, "flattened rewrite must not be accepted");
+  assert.equal(res.rewritten, INDENTED_ORIGINAL);
+  assert.equal(res.sanitizerWarning, true);
+  assert.equal(res.invalidReason, "indent");
+});
+
+test("rewriteFile: accepts a well-indented rewrite", async () => {
+  const wellIndented = [
+    "export function run() {",
+    "  const value = 1;",
+    "  if (value) {",
+    "    console.log(value);",
+    "  }",
+    "  return value;",
+    "}",
+  ].join("\n");
+  const res = await rewriteFile("src/x.ts", INDENTED_ORIGINAL, configStub, {
+    client: mockClient([wellIndented]),
+    scope: "file",
+  });
+  assert.equal(res.changed, true);
+  assert.equal(res.rewritten, wellIndented);
 });
