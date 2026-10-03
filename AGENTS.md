@@ -17,18 +17,24 @@ Apply `docs/SKILL.md` automatically whenever generating, editing, or refactoring
 ## Architecture overview
 
 ```
-src/cli.ts        → command router (init / install / detect / rewrite / audit)
-src/config.ts     → loads .bypasser.json and env vars (+ per-glob thresholds, temperature)
-src/detector.ts   → deterministic AI-pattern scorer (no API, six signal families). Language-agnostic via per-language profiles (JS/TS, Python, Go, Rust, Java, C#, C/C++, Ruby, PHP).
-src/rewriter.ts   → calls OpenAI-compatible API using docs/SKILL.md as system prompt
-src/git.ts        → reads staged diff via `git show :path`, writes rewritten content back and re-stages; also `getWorkingTreeFiles()` for `detect --all`
-src/installer.ts  → writes/removes the pre-commit hook in .git/hooks/
-src/audit.ts      → full pipeline: detect → rewrite → restage
-src/logger.ts     → appends .bypasser.log + persists rewrite hashes in .bypasser.state.json
-src/notifier.ts   → Windows toast notifications (detached, non-blocking)
-src/index.ts      → public library exports
-docs/SKILL.md     → humanizer skill prompt loaded at runtime by src/rewriter.ts
-test/             → node:test suites (run with tsx)
+src/cli.ts               → command router (init / install / uninstall / detect / rewrite / audit)
+src/config.ts            → loads .bypasser.json and env vars (+ per-glob thresholds, scope, timeouts)
+src/detector.ts          → deterministic AI-pattern scorer (no API, six signal families). Language-agnostic via per-language profiles (JS, TS, Python, Go, Rust, Java, C#, C/C++, Ruby, PHP, unknown).
+src/rewriter.ts          → calls OpenAI-compatible API using docs/SKILL.md as system prompt; full-file / diff-hunk / chunk strategies + response sanitizer
+src/rewrite-constants.ts → shared truncation/compression ratios (used by rewriter + restageFile)
+src/rewrite-validate.ts  → post-rewrite validators: looksIndentBroken, looksStructurallyBroken
+src/diff-hunks.ts        → parse/merge unified-diff hunk ranges, slice/splice, addedLineFraction
+src/chunk-split.ts       → splits a file into chunks at top-level declaration boundaries (per language)
+src/concurrency.ts       → mapPool: bounded-concurrency async pool, order-preserving
+src/git.ts               → reads staged diff via `git show :path`, writes rewritten content back and re-stages; `getWorkingTreeFiles()` for `detect --all`
+src/installer.ts         → writes/removes the pre-commit hook in .git/hooks/
+src/audit.ts             → full pipeline: detect → rewrite → restage → log → notify
+src/logger.ts            → appends .bypasser.log + persists rewrite hashes and detection cache in .bypasser.state.json
+src/notifier.ts          → Windows toast notifications (BurntToast → WinRT → balloon, detached)
+src/index.ts             → public library exports
+docs/SKILL.md            → humanizer skill prompt loaded at runtime by src/rewriter.ts
+scripts/test.js          → cross-platform test runner (resolves test files, requires Node >= 20.6 for tsx --import)
+test/                    → node:test suites (run via scripts/test.js)
 ```
 
 ## Commands
@@ -36,10 +42,13 @@ test/             → node:test suites (run with tsx)
 ```bash
 npm run build      # tsc → dist/
 npm run typecheck  # tsc over src + test (no emit)
-npm test           # tsx --test test/**/*.test.ts
+npm test           # node scripts/test.js  → node --import tsx --test on resolved test files
+npm run dev        # tsc --watch
 npm run lint       # eslint (flat config)
 npm run format     # prettier
 ```
+
+> Tests run on Node >= 20.6 (tsx v4 needs `--import`). The shipped CLI in `dist/` still supports Node >= 18. `scripts/test.js` exists because Node's `--test` only accepts explicit file paths on CI (globs fail).
 
 ---
 
@@ -54,6 +63,9 @@ bypasser init --force
 
 # Install pre-commit hook
 bypasser install
+
+# Remove the pre-commit hook
+bypasser uninstall
 
 # Manually detect AI patterns in staged files
 bypasser detect --verbose
@@ -75,7 +87,7 @@ bypasser audit --dry-run
 
 ## Configuration
 
-The tool reads `.bypasser.json` at the project root. All fields are optional:
+The tool reads `.bypasser.json` at the project root. All fields are optional. `bypasser init` writes the full default set:
 
 ```json
 {
@@ -83,13 +95,37 @@ The tool reads `.bypasser.json` at the project root. All fields are optional:
   "model": "ag/claude-sonnet-4-6",
   "threshold": 0.65,
   "maxTokens": 16384,
-  "ignore": []
+  "temperature": 0.4,
+  "ignore": [],
+  "thresholds": [],
+  "timeoutMs": 120000,
+  "timeoutPer1kLinesMs": 30000,
+  "maxTimeoutMs": 600000,
+  "maxFileLines": 2000,
+  "rewriteConcurrency": 3,
+  "rewriteScope": "auto",
+  "rewriteFullFileBelowLines": 400,
+  "contextLines": 60,
+  "maxChunkLines": 450,
+  "structuralCheck": true
 }
 ```
 
-Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback.
+Key fields (see `src/config.ts` `BypasserConfig` for the source of truth):
 
-`bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates the file from the built-in defaults.
+- `threshold` (0–1, default 0.65) — score above which a file is rewritten.
+- `thresholds` — per-glob overrides `[{ "pattern": "src/legacy/**", "value": 0.3 }]`; first match wins (`resolveThreshold`).
+- `temperature` (default 0.4) — rewrite sampling temperature.
+- `timeoutMs` / `timeoutPer1kLinesMs` / `maxTimeoutMs` — base rewrite timeout (2 min), +30 s per extra 1000 lines, hard cap 10 min (`scaledTimeoutMs`).
+- `maxFileLines` (default 2000, `0` disables) — skip full-file rewrites above this size; `diff`/`chunk` scopes still run.
+- `rewriteConcurrency` (default 3) — parallel rewrite API calls per audit (`mapPool`).
+- `rewriteScope` (`file` | `diff` | `chunk` | `auto`, default `auto`) — how content is sent to the model.
+- `rewriteFullFileBelowLines` / `contextLines` / `maxChunkLines` — knobs for the `auto` scope decision and diff/chunk slicing.
+- `structuralCheck` (default true) — reject rewrites that drop too many top-level declarations.
+
+Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback. `BYPASSER_VERBOSE=1` forces verbose output for `audit`.
+
+`bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates the file from the built-in defaults. `init` also appends `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
 
 Any OpenAI-compatible endpoint works: OpenAI, Ollama, LM Studio, OpenRouter, Groq, Anthropic via proxy.
 
@@ -132,23 +168,29 @@ Files at or above the effective threshold (per-glob override via `config.thresho
 
 ## Humanizer skill — how the rewriter uses it
 
-`src/rewriter.ts` loads `docs/SKILL.md` at runtime and injects it as the system prompt. The user message contains the file path and full content. The model returns the rewritten file content only — no markdown fences, no explanations.
+`src/rewriter.ts` loads `docs/SKILL.md` at runtime and injects it as the system prompt (with an inline fallback if the file is missing). In full-file mode the user message contains the file path and full content; in `diff`/`chunk` modes it receives a numbered fragment and a fragment-mode system prompt, and must return only the rewritten fragment. In all cases the model returns content only — no markdown fences, no explanations.
 
-When editing `src/rewriter.ts`, the temperature comes from `config.temperature` (default `0.4`) — low enough for consistency, high enough for variation.
+When editing `src/rewriter.ts`, the temperature comes from `config.temperature` (default `0.4`) — low enough for consistency, high enough for variation. `sanitizeResponse` also strips stray markdown fences and a hallucinated leading path header before validating.
 
 ### Detect full file / rewrite scoped
 
-`audit.ts` always runs `detectAI` on the **full staged file** (never diff-only scoring). The rewriter chooses scope via `resolveEffectiveRewriteScope` (`file`, `diff`, `chunk`, or `auto`): full file for small sources, diff hunks with `contextLines` for large files with small edits, chunks capped by `maxChunkLines` for mostly-new large files. Parallel rewrites across **different staged files** use `rewriteConcurrency`; hunks/chunks within one file are applied bottom-up sequentially so line numbers stay valid.
+`audit.ts` always runs `detectAI` on the **full staged file** (never diff-only scoring). The rewriter chooses scope via `resolveEffectiveRewriteScope` (`file`, `diff`, `chunk`, or `auto`): full file for small sources (`rewriteFullFileBelowLines`), diff hunks with `contextLines` for large files with small edits (`diff-hunks.ts`), chunks capped by `maxChunkLines` for mostly-new large files (`chunk-split.ts`). Parallel rewrites across **different staged files** use `rewriteConcurrency` (`mapPool` in `concurrency.ts`); hunks/chunks within one file are applied bottom-up sequentially so line numbers stay valid (`spliceSlice`). Per-request timeout scales with size via `scaledTimeoutMs`.
 
-### Truncation guard (never remove)
+### Detection cache (`.bypasser.state.json`)
 
-A rewrite must **never** silently lose part of a file. This is a hard invariant: a model cut off at `max_tokens` produced a valid-looking response that passed the old sanitizer and was restaged over the original, destroying ~2000 lines of a file. `sanitizeResponse` therefore rejects a response when **any** of these hold, always keeping the original:
+`audit.ts` skips re-scoring unchanged files: `cachedDetectionScore(state, path, hash)` returns a prior score when the content hash matches; otherwise the file is scored and `recordDetection` persists it. Successful rewrites are keyed by content hash via `recordRewrite` so `rewriteFile` can skip already-humanized content (`res.skipped`). `logger.ts` owns this sidecar store and tolerates legacy flat-map state.
 
-1. `finish_reason === "length"` — the model ran out of tokens (the only 100% reliable signal).
-2. `looksTruncated()` — the result is under 75% of the original line count (for files ≥12 lines) or has unbalanced brackets outside strings/comments.
-3. Chatbot prose or no recognisable code token (the original prose guard).
+### Truncation / integrity guards (never remove)
 
-And the write itself is defensive: `restageFile()` (in `git.ts`) refuses to write empty content over a non-empty file, copies the current content to `<path>.bak`, and writes atomically (temp + rename). Do not weaken or bypass any of these — `test/rewriter.test.ts` and `test/restage.test.ts` lock them in.
+A rewrite must **never** silently lose or corrupt a file. This is a hard invariant: a model cut off at `max_tokens` produced a valid-looking response that passed the old sanitizer and was restaged over the original, destroying ~2000 lines of a file. Guards, all keeping the original on failure:
+
+1. `finish_reason === "length"` — the model ran out of tokens (the only 100% reliable signal). Always rejects.
+2. `looksTruncated()` (`rewriter.ts`) — unbalanced brackets outside strings/comments, or a line-count collapse. The collapse ratio depends on `finishReason`: a clean `stop` tolerates legitimate compression down to `COMPRESSION_LINE_RATIO` (0.4); any other/unknown reason uses the stricter `TRUNCATION_LINE_RATIO` (0.75). Only meaningful for files ≥ `TRUNCATION_MIN_LINES` (12).
+3. Chatbot prose / no recognisable code token (the original prose guard), plus a hallucinated path-header strip.
+4. `looksIndentBroken()` (`rewrite-validate.ts`) — rejects a rewrite that systemically flattens indentation (correct tokens, wrong structure).
+5. `looksStructurallyBroken()` (`rewrite-validate.ts`) — rejects a rewrite that drops too many top-level declarations (gated by `structuralCheck`).
+
+All ratios live in `rewrite-constants.ts`. And the write itself is defensive: `restageFile()` (in `git.ts`) refuses empty content over a non-empty file, refuses a severe shrink (severe-shrink floor), copies the current content to `<path>.bak`, writes atomically (temp + rename), and retries `git add` with exponential backoff (`gitAddWithRetry`, 5 attempts) before rolling the worktree back to the backup (`restoreBackup`) so a failed re-stage never leaves a corrupted file. Do not weaken or bypass any of these — `test/rewriter.test.ts`, `test/restage.test.ts`, and `test/indent-validate.test.ts` lock them in.
 
 ---
 
