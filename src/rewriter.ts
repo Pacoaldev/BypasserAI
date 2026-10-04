@@ -34,17 +34,32 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  */
 export type InvalidReason = "truncated" | "prose" | "no-code" | "indent" | "syntax";
 
-// Load the humanizer skill prompt from docs/SKILL.md
+/** Strip YAML frontmatter so only skill body reaches the model. */
+function stripSkillFrontmatter(raw: string): string {
+  if (!raw.startsWith("---")) return raw;
+  const end = raw.indexOf("---", 3);
+  if (end === -1) return raw;
+  return raw.slice(end + 3).trimStart();
+}
+
+// Load humanizer skill from docs/SKILL.en.md (default) or docs/SKILL.es.md (BYPASSER_SKILL_LOCALE=es)
 function loadSkillPrompt(): string {
-  // resolve relative to the package root (one level up from src/dist)
-  const candidates = [
-    resolve(__dirname, "../docs/SKILL.md"),
-    resolve(__dirname, "../../docs/SKILL.md"),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) return readFileSync(p, "utf8");
+  const locale = (process.env.BYPASSER_SKILL_LOCALE ?? "en").toLowerCase();
+  const skillFile = locale.startsWith("es") ? "SKILL.es.md" : "SKILL.en.md";
+  const roots = [resolve(__dirname, "../docs"), resolve(__dirname, "../../docs")];
+  for (const root of roots) {
+    const p = resolve(root, skillFile);
+    if (existsSync(p)) return stripSkillFrontmatter(readFileSync(p, "utf8"));
   }
-  // fallback: inline minimal version so the tool never breaks
+  // Legacy monolingual file (pre split en/es)
+  for (const root of roots) {
+    const legacy = resolve(root, "SKILL.md");
+    if (!existsSync(legacy)) continue;
+    const raw = readFileSync(legacy, "utf8");
+    if (raw.includes("## Guidelines") || raw.includes("## Directrices")) {
+      return stripSkillFrontmatter(raw);
+    }
+  }
   return `You are a code humanizer. Rewrite AI-generated code so it reads as written by an intermediate human developer. Apply subtle naming variations, mix control flow styles, comment sparingly in natural tone, and avoid RLHF-polished patterns. Never degrade correctness, security, or readability.`;
 }
 

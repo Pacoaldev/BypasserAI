@@ -1,4 +1,4 @@
-# Docs are intentionally tracked (docs/SKILL.md is required at runtime)
+# Docs are intentionally tracked (docs/SKILL.en.md / SKILL.es.md required at runtime)
 
 # Dependencies
 node_modules/

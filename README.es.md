@@ -33,7 +33,7 @@
 **BypasserAI** es un hook pre-commit de Git y una CLI que:
 
 1. **Puntúa** los archivos en staging buscando patrones típicos de código generado por IA (sin API, determinista).
-2. **Reescribe** los que superan tu umbral mediante cualquier API de chat **compatible con OpenAI**, guiada por la [skill humanizer](docs/SKILL.md) incluida.
+2. **Reescribe** los que superan tu umbral mediante cualquier API de chat **compatible con OpenAI**, guiada por la [skill humanizer](docs/SKILL.es.md) ([English](docs/SKILL.en.md)).
 3. **Vuelve a hacer stage** de las reescrituras correctas para que el commit use la versión humanizada.
 
 Es **agnóstico al lenguaje** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, etc.) y **al proyecto**: lo instalas una vez por repo, apuntas al proveedor y lo olvidas hasta que el toast te avise.
@@ -268,6 +268,7 @@ bypasser audit --verbose
 | `OPENAI_API_KEY` | Clave alternativa |
 | `BYPASSER_VERBOSE` | `1` → salida verbose en audit/hook |
 | `BYPASSER_HOOK_EXCLUDED_REPOS` | Nombres de carpeta de repo separados por comas para bloquear `install` |
+| `BYPASSER_SKILL_LOCALE` | `es` → prompt humanizer en español; por defecto inglés |
 
 ### Elección de modelo (importante)
 
@@ -327,7 +328,9 @@ src/
   notifier.ts         Pipeline de toasts Windows
   index.ts            Exports de librería pública
 docs/
-  SKILL.md            System prompt humanizer (carga en runtime)
+  SKILL.en.md         Prompt humanizer (default en runtime)
+  SKILL.es.md         Prompt humanizer (español)
+  SKILL.md            Índice bilingüe + locale
 ```
 
 ---

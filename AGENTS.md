@@ -1,6 +1,6 @@
 # BypasserAI (agent instructions)
 
-This repository is the **bypasser-ai** tool: a Node.js/TypeScript pre-commit hook and CLI that scores **full staged file content** for AI-generated patterns (git diffs gate eligibility and choose rewrite scope) and rewrites flagged files via any OpenAI-compatible API. It also contains the **humanizer** skill (`docs/SKILL.md`) that drives the rewriting.
+This repository is the **bypasser-ai** tool: a Node.js/TypeScript pre-commit hook and CLI that scores **full staged file content** for AI-generated patterns (git diffs gate eligibility and choose rewrite scope) and rewrites flagged files via any OpenAI-compatible API. It also contains the **humanizer** skill (`docs/SKILL.en.md` / `docs/SKILL.es.md`; index `docs/SKILL.md`) that drives the rewriting.
 
 No scripts beyond the tool itself, no external runtime dependencies beyond Node ≥ 18 and the `openai` SDK. Language-agnostic — works on any project regardless of the code being committed.
 
@@ -10,7 +10,7 @@ It is the entry point for any AI coding tool that reads `AGENTS.md` (Codex, Open
 
 ## When to apply the humanizer skill
 
-Apply `docs/SKILL.md` automatically whenever generating, editing, or refactoring code that will end up in a git commit — even when the user does not ask. Do **not** apply it to config files, lock files, build artifacts, or generated content.
+Apply `docs/SKILL.en.md` or `docs/SKILL.es.md` automatically whenever generating, editing, or refactoring code that will end up in a git commit — even when the user does not ask. Do **not** apply it to config files, lock files, build artifacts, or generated content. Runtime locale: `BYPASSER_SKILL_LOCALE=es` loads the Spanish skill text in the rewriter.
 
 ---
 
@@ -20,7 +20,7 @@ Apply `docs/SKILL.md` automatically whenever generating, editing, or refactoring
 src/cli.ts               → command router (init / install / uninstall / detect / rewrite / audit)
 src/config.ts            → loads .bypasser.json and env vars (+ per-glob thresholds, scope, timeouts)
 src/detector.ts          → deterministic AI-pattern scorer (no API, six signal families). Language-agnostic via per-language profiles (JS, TS, Python, Go, Rust, Java, C#, C/C++, Ruby, PHP, unknown).
-src/rewriter.ts          → calls OpenAI-compatible API using docs/SKILL.md as system prompt; full-file / diff-hunk / chunk strategies + response sanitizer
+src/rewriter.ts          → calls OpenAI-compatible API using docs/SKILL.en.md (or SKILL.es.md) as system prompt; full-file / diff-hunk / chunk strategies + response sanitizer
 src/rewrite-constants.ts → shared truncation/compression ratios (used by rewriter + restageFile)
 src/rewrite-validate.ts  → post-rewrite validators: looksIndentBroken, looksStructurallyBroken
 src/bracket-balance.ts   → language-aware bracket balance scanner (respects `#` comments, Python docstrings, block comments); the `unbalanced-brackets` truncation signal
@@ -34,7 +34,7 @@ src/audit.ts             → full pipeline: detect → rewrite → restage → l
 src/logger.ts            → appends .bypasser.log + persists rewrite hashes and detection cache in .bypasser.state.json
 src/notifier.ts          → Windows toast notifications (BurntToast → WinRT → balloon, detached)
 src/index.ts             → public library exports
-docs/SKILL.md            → humanizer skill prompt loaded at runtime by src/rewriter.ts
+docs/SKILL.en.md / SKILL.es.md → humanizer prompt loaded by src/rewriter.ts (see docs/SKILL.md)
 scripts/canonical-bypasser.json → full default knobs for bulk `.bypasser.json` sync (skip excluded repos)
 scripts/test.js          → cross-platform test runner (resolves test files, requires Node >= 20.6 for tsx --import)
 test/                    → node:test suites (run via scripts/test.js)
@@ -159,7 +159,7 @@ Key fields (see `src/config.ts` `BypasserConfig` for the source of truth):
 - `rewriteFullFileBelowLines` / `contextLines` / `maxChunkLines` — knobs for the `auto` scope decision and diff/chunk slicing.
 - `structuralCheck` (default true) — reject rewrites that drop too many top-level declarations.
 
-Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback. `BYPASSER_VERBOSE=1` forces verbose output for `audit`.
+Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback. `BYPASSER_VERBOSE=1` forces verbose output for `audit`. `BYPASSER_SKILL_LOCALE=es` selects the Spanish humanizer skill file for API rewrites.
 
 `bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates a **starter** file from `src/cli.ts` (core rewrite knobs; timeout/`maxFileLines` fields may be omitted — runtime still uses `DEFAULTS`). For a complete on-disk template, use `scripts/canonical-bypasser.json`. `init` also appends `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
 
@@ -208,7 +208,7 @@ Files at or above the effective threshold (per-glob override via `config.thresho
 
 ## Humanizer skill — how the rewriter uses it
 
-`src/rewriter.ts` loads `docs/SKILL.md` at runtime and injects it as the system prompt (with an inline fallback if the file is missing). In full-file mode the user message contains the file path and full content; in `diff`/`chunk` modes it receives a numbered fragment and a fragment-mode system prompt, and must return only the rewritten fragment. In all cases the model returns content only — no markdown fences, no explanations.
+`src/rewriter.ts` loads `docs/SKILL.en.md` (or `SKILL.es.md` when `BYPASSER_SKILL_LOCALE=es`) and injects it as the system prompt (with an inline fallback if the file is missing). In full-file mode the user message contains the file path and full content; in `diff`/`chunk` modes it receives a numbered fragment and a fragment-mode system prompt, and must return only the rewritten fragment. In all cases the model returns content only — no markdown fences, no explanations.
 
 When editing `src/rewriter.ts`, the temperature comes from `config.temperature` (default `0.4`) — low enough for consistency, high enough for variation. `sanitizeResponse` also strips stray markdown fences and a hallucinated leading path header before validating. `callModel` scales `max_tokens` with fragment size and **retries once** on `finish_reason=length` with a higher cap. Chunk mode **retries with half `maxChunkLines`** when the first pass changed nothing.
 
@@ -246,4 +246,4 @@ Never degrade security, critical error handling, or legibility to appear more hu
 
 ## Scope
 
-This tool targets code authenticity for Git workflows. It is not for defeating plagiarism detectors or academic integrity systems, and names no specific detector. Reframe such requests toward genuine code quality and natural development style (see `docs/SKILL.md` → Limits).
+This tool targets code authenticity for Git workflows. It is not for defeating plagiarism detectors or academic integrity systems, and names no specific detector. Reframe such requests toward genuine code quality and natural development style (see `docs/SKILL.en.md` → Limits).

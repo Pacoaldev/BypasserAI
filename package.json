@@ -19,6 +19,8 @@
   "files": [
     "dist",
     "docs/SKILL.md",
+    "docs/SKILL.en.md",
+    "docs/SKILL.es.md",
     "assets/logo.png"
   ],
   "keywords": [
