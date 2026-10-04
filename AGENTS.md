@@ -23,6 +23,7 @@ src/detector.ts          → deterministic AI-pattern scorer (no API, six signal
 src/rewriter.ts          → calls OpenAI-compatible API using docs/SKILL.md as system prompt; full-file / diff-hunk / chunk strategies + response sanitizer
 src/rewrite-constants.ts → shared truncation/compression ratios (used by rewriter + restageFile)
 src/rewrite-validate.ts  → post-rewrite validators: looksIndentBroken, looksStructurallyBroken
+src/bracket-balance.ts   → language-aware bracket balance scanner (respects `#` comments, Python docstrings, block comments); the `unbalanced-brackets` truncation signal
 src/syntax-guard.ts      → best-effort parse check (Python via interpreter, JSON via JSON.parse) on assembled/full rewrites
 src/diff-hunks.ts        → parse/merge unified-diff hunk ranges, slice/splice, addedLineFraction
 src/chunk-split.ts       → splits a file into chunks at top-level declaration boundaries (per language)
@@ -226,7 +227,7 @@ When editing `src/rewriter.ts`, the temperature comes from `config.temperature` 
 A rewrite must **never** silently lose or corrupt a file. This is a hard invariant: a model cut off at `max_tokens` produced a valid-looking response that passed the old sanitizer and was restaged over the original, destroying ~2000 lines of a file. Guards, all keeping the original on failure:
 
 1. `finish_reason === "length"` — the model ran out of tokens (the only 100% reliable signal). Always rejects.
-2. `looksTruncated()` (`rewriter.ts`) — unbalanced brackets outside strings/comments, or a line-count collapse. The collapse ratio depends on `finishReason`: a clean `stop` tolerates legitimate compression down to `COMPRESSION_LINE_RATIO` (0.4); any other/unknown reason uses the stricter `TRUNCATION_LINE_RATIO` (0.75). Only meaningful for files ≥ `TRUNCATION_MIN_LINES` (12).
+2. `looksTruncated()` (`rewriter.ts`) — unbalanced brackets outside strings/comments, or a line-count collapse. The bracket scan is **language-aware** (`hasUnbalancedBrackets` in `bracket-balance.ts`): it reads `lineComment` from the resolved `LanguageProfile` so a Python `# … .get()/.post() …` comment is not mistaken for code, and skips Python/Ruby triple-quoted docstrings and C-style block comments. **A C-only scan rejected valid Python files as "truncated" and committed the original slop — never regress to a `//`-only scanner.** The collapse ratio depends on `finishReason`: a clean `stop` tolerates legitimate compression down to `COMPRESSION_LINE_RATIO` (0.4); any other/unknown reason uses the stricter `TRUNCATION_LINE_RATIO` (0.75). Only meaningful for files ≥ `TRUNCATION_MIN_LINES` (12).
 3. Chatbot prose / no recognisable code token (the original prose guard), plus a hallucinated path-header strip.
 4. `looksIndentBroken()` (`rewrite-validate.ts`) — rejects a rewrite that systemically flattens indentation (correct tokens, wrong structure).
 5. `looksStructurallyBroken()` (`rewrite-validate.ts`) — rejects a rewrite that drops too many top-level declarations (gated by `structuralCheck`).

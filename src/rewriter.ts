@@ -20,6 +20,7 @@ import { splitIntoChunks } from "./chunk-split.js";
 import { looksIndentBroken, looksStructurallyBroken } from "./rewrite-validate.js";
 import { checkSyntax } from "./syntax-guard.js";
 import { resolveLanguage } from "./detector.js";
+import { hasUnbalancedBrackets } from "./bracket-balance.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -141,10 +142,13 @@ function looksLikeCode(text: string, filePath: string): boolean {
 export function looksTruncated(
   rewritten: string,
   original: string,
-  finishReason?: string
+  finishReason?: string,
+  filePath?: string
 ): boolean {
   // A structurally broken response is rejected regardless of finish reason.
-  if (hasUnbalancedBrackets(rewritten)) return true;
+  // The balance check is language-aware: `#` comments and Python docstrings
+  // must not be scanned as code (see bracket-balance.ts).
+  if (hasUnbalancedBrackets(rewritten, resolveLanguage(filePath, rewritten))) return true;
 
   const originalLines = original.split("\n").length;
   if (originalLines < TRUNCATION_MIN_LINES) return false;
@@ -168,9 +172,11 @@ export function looksTruncated(
 export function truncationReason(
   rewritten: string,
   original: string,
-  finishReason?: string
+  finishReason?: string,
+  filePath?: string
 ): "unbalanced-brackets" | "line-collapse" | null {
-  if (hasUnbalancedBrackets(rewritten)) return "unbalanced-brackets";
+  if (hasUnbalancedBrackets(rewritten, resolveLanguage(filePath, rewritten)))
+    return "unbalanced-brackets";
 
   const originalLines = original.split("\n").length;
   if (originalLines < TRUNCATION_MIN_LINES) return null;
@@ -179,73 +185,9 @@ export function truncationReason(
   return rewrittenLines < originalLines * ratio ? "line-collapse" : null;
 }
 
-/** Rough bracket-balance check outside of string literals and line comments. */
-function hasUnbalancedBrackets(code: string): boolean {
-  const stack: string[] = [];
-  const closing: Record<string, string> = { "}": "{", ")": "(", "]": "[" };
-  const opening = new Set(["{", "(", "["]);
-
-  let inSingle = false;
-  let inDouble = false;
-  let inLineComment = false;
-  let backtick = false;
-
-  for (let i = 0; i < code.length; i++) {
-    const ch = code[i];
-    const next = code[i + 1];
-
-    if (inLineComment) {
-      if (ch === "\n") inLineComment = false;
-      continue;
-    }
-    if (inSingle) {
-      if (ch === "\\") i++;
-      else if (ch === "'") inSingle = false;
-      continue;
-    }
-    if (inDouble) {
-      if (ch === "\\") i++;
-      else if (ch === '"') inDouble = false;
-      continue;
-    }
-    if (backtick) {
-      if (ch === "\\") i++;
-      else if (ch === "`") backtick = false;
-      continue;
-    }
-
-    if (ch === "/" && next === "/") {
-      inLineComment = true;
-      i++;
-      continue;
-    }
-    if (ch === "'") {
-      inSingle = true;
-      continue;
-    }
-    if (ch === '"') {
-      inDouble = true;
-      continue;
-    }
-    if (ch === "`") {
-      backtick = true;
-      continue;
-    }
-
-    if (opening.has(ch)) {
-      stack.push(ch);
-    } else if (ch in closing) {
-      if (stack.length === 0 || stack[stack.length - 1] !== closing[ch]) {
-        // A closer with no matching opener — structurally broken.
-        return true;
-      }
-      stack.pop();
-    }
-  }
-
-  // Anything left open means the file was cut off mid-block.
-  return stack.length > 0;
-}
+// The balance scanner now lives in `bracket-balance.ts` (language-aware: it
+// respects `#` comments and Python triple-quoted strings). See that module for
+// why the old inline version rejected valid Python files as "truncated".
 
 /**
  * Strip markdown code fences and detect chatbot-style prose responses.
@@ -312,8 +254,8 @@ export function sanitizeResponse(
   //    of a large file (see looksTruncated). `finishReason` is threaded through
   //    so a clean stop tolerates legitimate compression while an unknown end
   //    keeps the strict ratio.
-  if (looksTruncated(withoutPathHeader, original, finishReason)) {
-    const reason = truncationReason(withoutPathHeader, original, finishReason);
+  if (looksTruncated(withoutPathHeader, original, finishReason, filePath)) {
+    const reason = truncationReason(withoutPathHeader, original, finishReason, filePath);
     console.warn(
       `[bypasser] ⚠ Rewrite of ${filePath} rejected ` +
         `(${reason === "unbalanced-brackets" ? "unbalanced brackets" : "line collapse"}: ` +
@@ -392,7 +334,7 @@ function isSafePartialHumanization(
   filePath: string
 ): boolean {
   if (working.trim() === original.trim()) return false;
-  if (hasUnbalancedBrackets(working)) return false;
+  if (hasUnbalancedBrackets(working, resolveLanguage(filePath, working))) return false;
   const syntax = checkSyntax(working, filePath);
   if (syntax.status === "invalid") return false;
   return true;
@@ -408,10 +350,10 @@ function validateAssembledFile(
   const oLines = original.split("\n").length;
   const aLines = assembled.split("\n").length;
   if (
-    looksTruncated(assembled, original, ASSEMBLY_FINISH) ||
+    looksTruncated(assembled, original, ASSEMBLY_FINISH, filePath) ||
     (oLines >= TRUNCATION_MIN_LINES && aLines < oLines * minLineRatio)
   ) {
-    const reason = truncationReason(assembled, original, ASSEMBLY_FINISH);
+    const reason = truncationReason(assembled, original, ASSEMBLY_FINISH, filePath);
     const detail =
       reason === "unbalanced-brackets"
         ? "unbalanced brackets after chunk assembly"

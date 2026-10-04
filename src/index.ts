@@ -1,6 +1,7 @@
 // Public API — for use as a library
 export { detectAI, extractAddedLines, countChangedLines, isTypeScriptPath, resolveLanguage } from "./detector.js";
 export { rewriteFile, contentHash } from "./rewriter.js";
+export { hasUnbalancedBrackets } from "./bracket-balance.js";
 export { runAudit } from "./audit.js";
 export { loadConfig, resolveThreshold, BUILT_IN_IGNORE } from "./config.js";
 export { getStagedFiles, getWorkingTreeFiles, restageFile, matchGlob, shouldIgnore } from "./git.js";
