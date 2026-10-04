@@ -174,7 +174,7 @@ async function main() {
 
       const defaultConfig = {
         baseURL: "http://localhost:20128/v1",
-        model: "ag/claude-sonnet-4-6",
+        model: "zd/claude-sonnet-4-5",
         threshold: 0.65,
         maxTokens: 16384,
         temperature: 0.4,
@@ -223,7 +223,7 @@ ENVIRONMENT VARIABLES
   BYPASSER_API_KEY      API key (overrides .bypasser.json)
   OPENAI_API_KEY        Fallback API key
   BYPASSER_BASE_URL     API base URL (default: http://localhost:20128/v1)
-  BYPASSER_MODEL        Model name (default: ag/claude-sonnet-4-6)
+  BYPASSER_MODEL        Model name (default: zd/claude-sonnet-4-5)
 
 DOCS
   https://github.com/pacoaldev/bypasser-ai

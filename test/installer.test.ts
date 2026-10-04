@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync
 import { tmpdir } from "os";
 import { join } from "path";
 import { execSync } from "child_process";
-import { install, uninstall } from "../src/installer.js";
+import { install, uninstall, isHookInstallExcluded } from "../src/installer.js";
 
 function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "bypasser-hook-"));
@@ -72,6 +72,20 @@ test("install is idempotent", () => {
     assert.ok(hook.includes("# bypasser-ai"));
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("agent-teams is permanently excluded from hook install", () => {
+  const parent = mkdtempSync(join(tmpdir(), "bypasser-excl-"));
+  const repo = join(parent, "agent-teams");
+  try {
+    mkdirSync(join(repo, ".git", "hooks"), { recursive: true });
+    execSync("git init -q", { cwd: repo });
+    assert.equal(isHookInstallExcluded(repo), true);
+    assert.throws(() => install(repo), /permanently disabled.*agent-teams/i);
+    assert.equal(existsSync(join(repo, ".git", "hooks", "pre-commit")), false);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
   }
 });
 

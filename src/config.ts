@@ -66,7 +66,7 @@ export interface ThresholdRule {
 const DEFAULTS: BypasserConfig = {
   baseURL: "http://localhost:20128/v1",
   apiKey: "",
-  model: "ag/claude-sonnet-4-6",
+  model: "zd/claude-sonnet-4-5",
   threshold: 0.65,
   maxTokens: 16384,
   temperature: 0.4,

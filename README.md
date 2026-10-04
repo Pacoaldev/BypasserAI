@@ -125,6 +125,8 @@ $env:BYPASSER_API_KEY = "sk-..."
 bypasser install
 ```
 
+**Never** run `bypasser install` in **`agent-teams`** (or other repos listed in [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusions-never-bypasser-ai)) — that project keeps its own pre-commit hook; the CLI refuses install there by design.
+
 That's it. From now on, every `git commit` in that project is scanned automatically.
 
 ---

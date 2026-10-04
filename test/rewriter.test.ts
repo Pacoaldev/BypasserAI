@@ -266,6 +266,17 @@ test("sanitizeResponse: chatbot prose is still rejected (existing behaviour)", (
   assert.equal(result.content, original);
 });
 
+test("looksTruncated: assembled chunk output uses stop semantics (compression allowed)", () => {
+  const original = slopPaddedOriginal();
+  const compressed = original
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+  // validateAssembledFile treats assembly as finish_reason=stop — must not reject ~50% shrink.
+  assert.equal(looksTruncated(compressed, original, "stop"), false);
+  assert.equal(looksTruncated(compressed, original), true);
+});
+
 test("sanitizeResponse: small file rewrite is not falsely flagged as truncated", () => {
   const original = "export const a = 1;\nexport const b = 2;\n";
   const rewritten = "export const a = 1;\nexport const b = 3;\n";

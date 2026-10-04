@@ -5,10 +5,33 @@ import {
   chmodSync,
   unlinkSync,
 } from "fs";
-import { resolve } from "path";
+import { resolve, basename } from "path";
 import { spawnSync } from "child_process";
 
 const HOOK_MARKER = "# bypasser-ai";
+
+/**
+ * Repositories that must never get a bypasser-ai pre-commit hook (by folder
+ * name). `agent-teams` ships its own pre-commit workflow — installing bypasser
+ * there breaks that pipeline.
+ */
+export const HOOK_INSTALL_EXCLUDED_REPO_NAMES = new Set(["agent-teams"]);
+
+/** True when `bypasser install` must refuse for this working directory. */
+export function isHookInstallExcluded(cwd: string): boolean {
+  return HOOK_INSTALL_EXCLUDED_REPO_NAMES.has(basename(resolve(cwd)).toLowerCase());
+}
+
+function assertHookInstallAllowed(cwd: string): void {
+  const name = basename(resolve(cwd));
+  if (!isHookInstallExcluded(cwd)) return;
+  throw new Error(
+    `bypasser-ai hook install is permanently disabled for "${name}". ` +
+      `That repo keeps its own pre-commit hook — do not install or bulk-deploy bypasser there. ` +
+      `See AGENTS.md → "Hook install exclusions".`
+  );
+}
+
 // Git for Windows only executes a hook named exactly `pre-commit` (no
 // extension) or `pre-commit.exe`. It *ignores* `pre-commit.cmd` / `.bat`
 // entirely — a .cmd trampoline silently never runs, which is a trap we fell
@@ -102,6 +125,8 @@ WScript.Quit 0
 }
 
 export function install(cwd = process.cwd()): void {
+  assertHookInstallAllowed(cwd);
+
   const hookDir = resolve(cwd, ".git", "hooks");
   if (!existsSync(hookDir)) {
     throw new Error(

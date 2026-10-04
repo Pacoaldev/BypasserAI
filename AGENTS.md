@@ -77,7 +77,19 @@ bypasser install
 
 # Remove the pre-commit hook
 bypasser uninstall
+```
 
+### Hook install exclusions (never bypasser-ai)
+
+These repositories **must never** receive `bypasser install`, bulk hook rollout, or `.bypasser.json` sync — they keep their own pre-commit workflow:
+
+| Repo folder | Reason |
+|-------------|--------|
+| **`agent-teams`** | Own `pre-commit` hook; bypasser would conflict or overwrite it |
+
+Enforced in code: `HOOK_INSTALL_EXCLUDED_REPO_NAMES` in `src/installer.ts` (`isHookInstallExcluded()`). `bypasser install` inside `agent-teams` throws; `bypasser uninstall` still works if our hook was installed by mistake. Agents running mass `bypasser install` under `PROYECTOS` must **skip** this directory.
+
+```bash
 # Manually detect AI patterns in staged files
 bypasser detect --verbose
 

@@ -19,6 +19,7 @@ import {
 import { splitIntoChunks } from "./chunk-split.js";
 import { looksIndentBroken, looksStructurallyBroken } from "./rewrite-validate.js";
 import { checkSyntax } from "./syntax-guard.js";
+import { resolveLanguage } from "./detector.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -64,7 +65,8 @@ const FRAGMENT_SYSTEM = `${SYSTEM_PROMPT}
 ## Fragment mode
 You receive a **fragment** of a larger file with 1-based line numbers START–END.
 Rewrite only this fragment. Return **only** the rewritten fragment text — no fences, no path, no explanation.
-Preserve the fragment's role in the file (same exports, signatures, and control flow).`;
+Preserve the fragment's role in the file (same exports, signatures, and control flow).
+Keep the **same indentation** as the input (leading spaces/tabs on each line). Do not drop lines unless they are narration comments you are intentionally removing.`;
 
 // Prose signals that indicate the model responded as a chatbot instead of
 // returning raw code. We check the first few lines where preamble appears.
@@ -86,7 +88,24 @@ const CODE_TOKENS = [
   /\bimport\b/, /\bexport\b/, /\bfunction\b/, /\bconst\b/, /\blet\b/,
   /\bvar\b/, /\bclass\b/, /\breturn\b/, /\bdef\b/, /\bfunc\b/,
   /^#!/, /^package\s/, /^using\s/,
+  /\bpass\b/, /\braise\b/, /\bexcept\b/, /\belif\b/, /\basync\b/,
+  /\bpublic\b/, /\bprivate\b/, /\bprotected\b/, /<\?php/,
 ];
+
+/** True when `text` looks like source in the language of `filePath`. */
+function looksLikeCode(text: string, filePath: string): boolean {
+  if (CODE_TOKENS.some((re) => re.test(text))) return true;
+  const p = resolveLanguage(filePath, text);
+  if (p.id === "python") {
+    return /\b(def|class|import|from|if|for|while|return|pass|raise|with|async|@)\b/.test(
+      text
+    );
+  }
+  if (p.id === "ruby") return /\b(def|class|module|end|require)\b/.test(text);
+  if (p.id === "go") return /\b(func|package|type|struct|return)\b/.test(text);
+  if (p.id === "rust") return /\b(fn|pub|struct|impl|enum|use)\b/.test(text);
+  return false;
+}
 
 /**
  * Detect a response that was cut off before the file was fully rewritten.
@@ -279,7 +298,7 @@ export function sanitizeResponse(
   );
 
   // 3. Verify the response contains at least one recognisable code token
-  const hasCode = CODE_TOKENS.some((re) => re.test(withoutPathHeader));
+  const hasCode = looksLikeCode(withoutPathHeader, filePath);
 
   if (hasProse || !hasCode) {
     console.warn(
@@ -361,6 +380,24 @@ function applyStructuralCheck(
   return { ok: true };
 }
 
+/**
+ * After chunk/diff assembly, a humanized file is often much shorter (comments
+ * stripped). Treat the assembly like a clean model stop, not an unknown cutoff.
+ */
+const ASSEMBLY_FINISH: string = "stop";
+
+function isSafePartialHumanization(
+  original: string,
+  working: string,
+  filePath: string
+): boolean {
+  if (working.trim() === original.trim()) return false;
+  if (hasUnbalancedBrackets(working)) return false;
+  const syntax = checkSyntax(working, filePath);
+  if (syntax.status === "invalid") return false;
+  return true;
+}
+
 function validateAssembledFile(
   original: string,
   assembled: string,
@@ -371,10 +408,10 @@ function validateAssembledFile(
   const oLines = original.split("\n").length;
   const aLines = assembled.split("\n").length;
   if (
-    looksTruncated(assembled, original) ||
+    looksTruncated(assembled, original, ASSEMBLY_FINISH) ||
     (oLines >= TRUNCATION_MIN_LINES && aLines < oLines * minLineRatio)
   ) {
-    const reason = truncationReason(assembled, original);
+    const reason = truncationReason(assembled, original, ASSEMBLY_FINISH);
     const detail =
       reason === "unbalanced-brackets"
         ? "unbalanced brackets after chunk assembly"
@@ -457,25 +494,78 @@ function finalizeRewrite(
   return sanitized;
 }
 
+function effectiveMaxTokens(config: BypasserConfig, userMessage: string): number {
+  const lines = userMessage.split("\n").length;
+  // Headroom for rewrites that expand slightly; cap at config.maxTokens.
+  const scaled = Math.ceil(lines * 14);
+  return Math.min(config.maxTokens, Math.max(4096, scaled));
+}
+
 async function callModel(
   client: RewriteClient,
   config: BypasserConfig,
   systemPrompt: string,
   userMessage: string
 ): Promise<{ raw: string; finishReason?: string }> {
-  const response = await client.chat.completions.create({
-    model: config.model,
-    max_tokens: config.maxTokens,
-    stream: false,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ],
-    temperature: config.temperature,
-  });
+  let maxTokens = effectiveMaxTokens(config, userMessage);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await client.chat.completions.create({
+      model: config.model,
+      max_tokens: maxTokens,
+      stream: false,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      temperature: config.temperature,
+    });
+    const finishReason = response.choices[0]?.finish_reason ?? undefined;
+    const raw = response.choices[0]?.message?.content ?? "";
+    if (finishReason !== "length" || attempt === 1) {
+      return { raw, finishReason };
+    }
+    maxTokens = Math.min(Math.max(Math.floor(maxTokens * 1.75), config.maxTokens), 65536);
+    console.warn(
+      `[bypasser] ⚠ Model hit token limit — retrying with max_tokens=${maxTokens}.`
+    );
+  }
+  return { raw: "", finishReason: "length" };
+}
+
+function finishChunkOrDiffRewrite(
+  content: string,
+  working: string,
+  filePath: string,
+  config: BypasserConfig,
+  anyChange: boolean,
+  minLineRatio: number
+): RewriteResult {
+  const whole = validateAssembledFile(content, working, filePath, config, minLineRatio);
+  if (!whole.wasInvalid) {
+    return {
+      rewritten: whole.content,
+      changed: anyChange && whole.content.trim() !== content.trim(),
+      hash: anyChange ? contentHash(whole.content) : contentHash(content),
+    };
+  }
+
+  if (anyChange && isSafePartialHumanization(content, working, filePath)) {
+    console.warn(
+      `[bypasser] ⚠ Assembly checks failed for ${filePath} (${whole.reason ?? "invalid"}) ` +
+        `but partial rewrite parses — keeping humanized slices.`
+    );
+    return {
+      rewritten: working,
+      changed: true,
+      hash: contentHash(working),
+    };
+  }
+
   return {
-    raw: response.choices[0]?.message?.content ?? "",
-    finishReason: response.choices[0]?.finish_reason ?? undefined,
+    rewritten: content,
+    changed: false,
+    sanitizerWarning: true,
+    invalidReason: whole.reason,
   };
 }
 
@@ -591,30 +681,24 @@ async function rewriteByDiff(
     }
   }
 
-  const whole = validateAssembledFile(content, working, filePath, config);
-  if (whole.wasInvalid) {
-    return {
-      rewritten: content,
-      changed: false,
-      sanitizerWarning: true,
-      invalidReason: whole.reason,
-    };
-  }
-
-  return {
-    rewritten: whole.content,
-    changed: anyChange && whole.content.trim() !== content.trim(),
-    hash: anyChange ? contentHash(whole.content) : contentHash(content),
-  };
+  return finishChunkOrDiffRewrite(
+    content,
+    working,
+    filePath,
+    config,
+    anyChange,
+    TRUNCATION_LINE_RATIO
+  );
 }
 
-async function rewriteByChunks(
+async function rewriteByChunksInner(
   client: RewriteClient,
   filePath: string,
   content: string,
-  config: BypasserConfig
+  config: BypasserConfig,
+  maxChunkLines: number
 ): Promise<RewriteResult> {
-  const chunks = splitIntoChunks(content, filePath, config.maxChunkLines).sort(
+  const chunks = splitIntoChunks(content, filePath, maxChunkLines).sort(
     (a, b) => b.startLine - a.startLine
   );
   let working = content;
@@ -651,27 +735,37 @@ async function rewriteByChunks(
     }
   }
 
-  const whole = validateAssembledFile(
+  return finishChunkOrDiffRewrite(
     content,
     working,
     filePath,
     config,
+    anyChange,
     CHUNK_ASSEMBLY_LINE_RATIO
   );
-  if (whole.wasInvalid) {
-    return {
-      rewritten: content,
-      changed: false,
-      sanitizerWarning: true,
-      invalidReason: whole.reason,
-    };
-  }
+}
 
-  return {
-    rewritten: whole.content,
-    changed: anyChange && whole.content.trim() !== content.trim(),
-    hash: anyChange ? contentHash(whole.content) : contentHash(content),
-  };
+async function rewriteByChunks(
+  client: RewriteClient,
+  filePath: string,
+  content: string,
+  config: BypasserConfig
+): Promise<RewriteResult> {
+  let result = await rewriteByChunksInner(
+    client,
+    filePath,
+    content,
+    config,
+    config.maxChunkLines
+  );
+  const smaller = Math.max(120, Math.floor(config.maxChunkLines / 2));
+  if (!result.changed && !result.skipped && smaller < config.maxChunkLines) {
+    console.warn(
+      `[bypasser] ⚠ Chunk rewrite did not stick for ${filePath} — retrying with maxChunkLines=${smaller}.`
+    );
+    result = await rewriteByChunksInner(client, filePath, content, config, smaller);
+  }
+  return result;
 }
 
 export async function rewriteFile(
