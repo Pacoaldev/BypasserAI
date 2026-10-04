@@ -1,6 +1,10 @@
 ---
 name: humanizer
-description: Human-like code authorship style. Apply when generating or editing source that will be committed to Git—even if not explicitly requested. Goal is natural developer voice and lower AI-pattern scores in IDEs, without sacrificing correctness.
+description: >-
+  Human-like code authorship style. Apply when generating or editing source
+  that will be committed to Git, even if not explicitly requested. Goal is
+  natural developer voice and lower AI-pattern scores in IDEs, without
+  sacrificing correctness.
 locale: en
 ---
 

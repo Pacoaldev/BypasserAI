@@ -1,6 +1,10 @@
 ---
 name: humanizer
-description: Estilo de código con autoría humana natural. Aplicar al generar o editar código que irá a un commit de Git, aunque el usuario no lo pida. Objetivo: voz de desarrollador real y menos patrones “de IA” en el IDE, sin perder corrección.
+description: >-
+  Estilo de código con autoría humana natural. Aplicar al generar o editar
+  código que irá a un commit de Git, aunque el usuario no lo pida. Objetivo:
+  voz de desarrollador real y menos patrones de IA en el IDE, sin perder
+  corrección.
 locale: es
 ---
 
