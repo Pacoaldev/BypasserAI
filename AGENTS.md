@@ -50,6 +50,17 @@ npm run format     # prettier
 
 > Tests run on Node >= 20.6 (tsx v4 needs `--import`). The shipped CLI in `dist/` still supports Node >= 18. `scripts/test.js` exists because Node's `--test` only accepts explicit file paths on CI (globs fail).
 
+### ⚠️ After changing `src/`, run `npm run build` — or the hook runs stale code
+
+`dist/` is **gitignored** (not versioned); the CLI a project actually executes is `dist/cli.js`. On the author's machine the globally-linked `bypasser` resolves through a **junction** (`npm/node_modules/bypasser-ai` → this repo), so **every project on the machine runs this repo's local `dist/`**. Consequences:
+
+- Editing `src/*.ts` does **nothing** for any project until `npm run build` regenerates `dist/`. A stale `dist/` means the hook runs old logic everywhere.
+- `git clone` + point the junction/hook at the repo **without** building ⇒ stale `dist/` (the classic "I fixed it but it still breaks" trap).
+- Shipping via the published tarball is fine: `package.json` → `files: ["dist", …]` bundles the built output.
+- CI (`.github/workflows/ci.yml`) runs `npm run build` after lint/typecheck/test, so a build that would fail is caught pre-merge.
+
+**Rule of thumb:** change `src/` → `npm run build` → (optionally) `npm test`. Never hand-edit `dist/`.
+
 ---
 
 ## How to run the tool
@@ -189,8 +200,9 @@ A rewrite must **never** silently lose or corrupt a file. This is a hard invaria
 3. Chatbot prose / no recognisable code token (the original prose guard), plus a hallucinated path-header strip.
 4. `looksIndentBroken()` (`rewrite-validate.ts`) — rejects a rewrite that systemically flattens indentation (correct tokens, wrong structure).
 5. `looksStructurallyBroken()` (`rewrite-validate.ts`) — rejects a rewrite that drops too many top-level declarations (gated by `structuralCheck`).
+6. `checkSyntax()` (`syntax-guard.ts`) — parses the **assembled** file with a real parser: Python via `compile()` through the `python`/`python3`/`py` interpreter, JSON via `JSON.parse`. Catches a *micro*-misindentation (a single line at the wrong level) that the conservative indent heuristic above deliberately ignores — the exact failure that produced an `IndentationError` in a ~2800-line Python file reassembled from LLM chunks. Best-effort: if no interpreter is found (`unavailable`) or the language has no cheap local parser (`unsupported`), it does **not** block. Applied in `validateAssembledFile()` (the whole-file backstop, which is what actually saves the case) and in `rewriteFullFile()`. New `InvalidReason: "syntax"`. Do **not** parse isolated fragments (a fragment without its parent `def` never parses alone → false rejects).
 
-All ratios live in `rewrite-constants.ts`. And the write itself is defensive: `restageFile()` (in `git.ts`) refuses empty content over a non-empty file, refuses a severe shrink (severe-shrink floor), copies the current content to `<path>.bak`, writes atomically (temp + rename), and retries `git add` with exponential backoff (`gitAddWithRetry`, 5 attempts) before rolling the worktree back to the backup (`restoreBackup`) so a failed re-stage never leaves a corrupted file. Do not weaken or bypass any of these — `test/rewriter.test.ts`, `test/restage.test.ts`, and `test/indent-validate.test.ts` lock them in.
+All ratios live in `rewrite-constants.ts`. And the write itself is defensive: `restageFile()` (in `git.ts`) refuses empty content over a non-empty file, refuses a severe shrink (severe-shrink floor), copies the current content to `<path>.bak`, writes atomically (temp + rename), and retries `git add` with exponential backoff (`gitAddWithRetry`, 5 attempts) before rolling the worktree back to the backup (`restoreBackup`) so a failed re-stage never leaves a corrupted file. Do not weaken or bypass any of these — `test/rewriter.test.ts`, `test/restage.test.ts`, `test/indent-validate.test.ts`, and `test/syntax-guard.test.ts` lock them in.
 
 ---
 
