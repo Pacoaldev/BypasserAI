@@ -18,6 +18,7 @@ import {
 } from "./diff-hunks.js";
 import { splitIntoChunks } from "./chunk-split.js";
 import { looksIndentBroken, looksStructurallyBroken } from "./rewrite-validate.js";
+import { checkSyntax } from "./syntax-guard.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -27,8 +28,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *  - `prose`     — chatbot preamble instead of raw code
  *  - `no-code`   — no recognisable code token
  *  - `indent`    — tokens are right but leading whitespace was flattened
+ *  - `syntax`    — the assembled file does not parse under a real parser
  */
-export type InvalidReason = "truncated" | "prose" | "no-code" | "indent";
+export type InvalidReason = "truncated" | "prose" | "no-code" | "indent" | "syntax";
 
 // Load the humanizer skill prompt from docs/SKILL.md
 function loadSkillPrompt(): string {
@@ -358,6 +360,17 @@ function validateAssembledFile(
     );
     return { content: original, wasInvalid: true, reason: "indent" };
   }
+  // Definitive backstop: parse the fully assembled file with a real parser when
+  // one is available. This is what catches a micro-misindentation (a single
+  // line at the wrong level) that the conservative indent heuristic ignores —
+  // the exact failure that produced an IndentationError in a large Python file.
+  const syntax = checkSyntax(assembled, filePath);
+  if (syntax.status === "invalid") {
+    console.warn(
+      `[bypasser] ⚠ Assembled rewrite of ${filePath} does not parse (${syntax.reason}) — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "syntax" };
+  }
   const structural = applyStructuralCheck(original, assembled, filePath, config);
   if (!structural.ok) {
     return { content: original, wasInvalid: true, reason: structural.reason };
@@ -463,6 +476,22 @@ async function rewriteFullFile(
     finishReason,
     config
   );
+  // Full-file rewrites are a complete, standalone source — safe to parse as a
+  // whole. A file that fails to parse must never replace the original.
+  if (!wasInvalid) {
+    const syntax = checkSyntax(rewritten, filePath);
+    if (syntax.status === "invalid") {
+      console.warn(
+        `[bypasser] ⚠ Rewrite of ${filePath} does not parse (${syntax.reason}) — keeping original.`
+      );
+      return {
+        rewritten: content,
+        changed: false,
+        sanitizerWarning: true,
+        invalidReason: "syntax",
+      };
+    }
+  }
   const changed = rewritten.trim() !== content.trim();
   return {
     rewritten,
