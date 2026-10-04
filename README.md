@@ -95,7 +95,7 @@ This creates `.bypasser.json` in your project root:
 ```json
 {
   "baseURL": "http://localhost:20128/v1",
-  "model": "ag/claude-sonnet-4-6",
+  "model": "zd/claude-sonnet-4-5",
   "threshold": 0.65,
   "maxTokens": 16384,
   "temperature": 0.4,
@@ -228,7 +228,7 @@ bypasser uninstall
 | Field | Default | Description |
 |-------|---------|-------------|
 | `baseURL` | `http://localhost:20128/v1` | Any OpenAI-compatible endpoint |
-| `model` | `ag/claude-sonnet-4-6` | Model name for your provider |
+| `model` | `zd/claude-sonnet-4-5` | Model name for your provider. **Pick a model that returns the fragment at full length** — some models silently return a *compressed* rewrite (~50% of the input, dropping keywords), which the guards then reject, so nothing gets humanized. See the model note below |
 | `threshold` | `0.65` | Score (0–1) above which rewrite triggers |
 | `maxTokens` | `16384` | Max tokens for rewrite response |
 | `temperature` | `0.4` | Sampling temperature for the rewrite (higher = more variation) |
@@ -246,6 +246,18 @@ bypasser uninstall
 | `structuralCheck` | `true` | Reject rewrites that drop too many top-level declarations |
 
 > **Detection always scores the full staged file** (so small edits in large AI files still count). **Rewriting** uses `rewriteScope`: small files are sent whole; large files with small diffs use hunk slices; mostly-new large files are split into chunks. Set `BYPASSER_VERBOSE=1` or `audit --verbose` for per-signal output (the pre-commit hook runs quiet by default). The effective timeout scales with file size (`timeoutMs` + 30 s per extra 1000 lines, capped at `maxTimeoutMs`).
+
+> **⚠️ Model choice matters — a bad model means nothing gets humanized.** The rewriter
+> sends a fragment and expects the **same fragment** back, only humanized. Some models
+> instead return a *heavily compressed* rewrite (as little as ~10–35% of the input,
+> dropping `def`/`for`/`:` and whole statements). The integrity guards then correctly
+> reject it, so the file is committed **unchanged** — the hook runs but never humanizes.
+> Before committing to a model, verify it round-trips a large fragment at full length
+> (output ≈ input line count, declarations intact). The default `zd/claude-sonnet-4-5`
+> was chosen because it returns the fragment at ~1.0× the input size and stays valid.
+> Models that **failed** this check in testing: `ag/claude-sonnet-4-6` (×0.34),
+> `gh/gpt-4o-2024-11-20` (×0.03), `ag/gemini-3-flash` (×0.10),
+> `mistral/magistral-medium-latest` (×0.10), `groq/openai/gpt-oss-20b` (×0.28, corrupt).
 
 ### Environment variables
 
@@ -277,7 +289,7 @@ Anything that speaks the OpenAI chat completions protocol works:
 ```json
 {
   "baseURL": "http://localhost:20128/v1",
-  "model": "ag/claude-sonnet-4-6",
+  "model": "zd/claude-sonnet-4-5",
   "threshold": 0.65,
   "maxTokens": 16384,
   "temperature": 0.4,
@@ -354,6 +366,8 @@ src/
                 resolves a per-language profile (JS/TS, Python, Go, Rust, Java,
                 C#, C/C++, Ruby, PHP) and scores a cluster of weighted signals.
   rewriter.ts   OpenAI-compatible API client + humanizer prompt + response sanitizer
+  rewrite-validate.ts  Heuristic integrity guards (truncation, indent, structure)
+  syntax-guard.ts      Real-parser guard: Python via compile(), JSON via JSON.parse
   git.ts        Staged diff reader + file restager
   installer.ts  Pre-commit hook writer/remover
   audit.ts      Full pipeline: detect → rewrite → restage → log → notify
@@ -373,6 +387,31 @@ docs/
 - Not intended for academic plagiarism evasion — only for natural Git authorship style
 - The detector uses heuristics, not a full AST parser; false positives are possible on unusual codebases. Raise `threshold` if it fires too often, or use per-glob `thresholds` to relax it for legacy folders
 - If a rewrite fails (API down, bad key), the commit is **never blocked**: the failure is reported in the terminal, written to `.bypasser.log`, and surfaced as an error toast
+- Humanization only happens if the model returns the fragment at full length. A model that compresses its output is rejected by the integrity guards and the file is committed unchanged (see the model note under Configuration) — that is **not** a bug in the hook
+
+### Integrity guards (the file is never corrupted)
+
+A rewrite must **never** silently lose or corrupt a file. On any doubt the original is kept:
+
+- **`finish_reason: length`** — the model ran out of tokens → always rejected
+- **`looksTruncated()`** — unbalanced brackets or a suspicious line-count collapse
+- **`looksIndentBroken()`** — systemic flattening of indentation
+- **`looksStructurallyBroken()`** — too many top-level declarations dropped
+- **`checkSyntax()`** (`syntax-guard.ts`) — parses the **assembled** file with a real parser (Python via `compile()`, JSON via `JSON.parse`) to catch a single mis-indented line that the heuristics miss. Best-effort: no interpreter → it does not block
+- **`restageFile()`** — refuses empty/severely-shrunk content, writes atomically, backs up to `<path>.bak`, and rolls back on a failed `git add`
+
+---
+
+## Development note — rebuild `dist/` after touching `src/`
+
+`dist/` is **gitignored**. The `bypasser` CLI (and therefore the pre-commit hook in every project) executes `dist/cli.js`, so editing `src/*.ts` has **no effect until you rebuild**:
+
+```bash
+npm run build   # tsc → dist/
+```
+
+On the author's machine the global `bypasser` is a **junction** pointing back at this repo, so a stale `dist/` means *every* project on the machine runs old logic — the classic "I fixed it but it still breaks" trap. `npm test` (89 tests) and CI (`npm run build`) cover this.
+
 
 ---
 
