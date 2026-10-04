@@ -135,6 +135,31 @@ export function looksTruncated(
   return rewrittenLines < originalLines * ratio;
 }
 
+/**
+ * Diagnostic for a rejected rewrite: *why* `looksTruncated` flagged it.
+ *
+ * `looksTruncated` collapses two independent conditions into one boolean, so
+ * its callers could only say "looks truncated" even when the line count had
+ * actually *grown*. The two are very different failures (an unbalanced-bracket
+ * assembly is usually a splice seam, not a token cutoff), so the log message
+ * must name the real one.
+ *
+ * Returns `null` when the rewrite is not flagged at all.
+ */
+export function truncationReason(
+  rewritten: string,
+  original: string,
+  finishReason?: string
+): "unbalanced-brackets" | "line-collapse" | null {
+  if (hasUnbalancedBrackets(rewritten)) return "unbalanced-brackets";
+
+  const originalLines = original.split("\n").length;
+  if (originalLines < TRUNCATION_MIN_LINES) return null;
+  const rewrittenLines = rewritten.split("\n").length;
+  const ratio = finishReason === "stop" ? COMPRESSION_LINE_RATIO : TRUNCATION_LINE_RATIO;
+  return rewrittenLines < originalLines * ratio ? "line-collapse" : null;
+}
+
 /** Rough bracket-balance check outside of string literals and line comments. */
 function hasUnbalancedBrackets(code: string): boolean {
   const stack: string[] = [];
@@ -269,9 +294,11 @@ export function sanitizeResponse(
   //    so a clean stop tolerates legitimate compression while an unknown end
   //    keeps the strict ratio.
   if (looksTruncated(withoutPathHeader, original, finishReason)) {
+    const reason = truncationReason(withoutPathHeader, original, finishReason);
     console.warn(
-      `[bypasser] ⚠ Rewrite of ${filePath} looks truncated ` +
-        `(${withoutPathHeader.split("\n").length} lines vs ${original.split("\n").length}) — keeping original.`
+      `[bypasser] ⚠ Rewrite of ${filePath} rejected ` +
+        `(${reason === "unbalanced-brackets" ? "unbalanced brackets" : "line collapse"}: ` +
+        `${withoutPathHeader.split("\n").length} lines vs ${original.split("\n").length}) — keeping original.`
     );
     return { content: original, wasInvalid: true, reason: "truncated" };
   }
@@ -347,8 +374,16 @@ function validateAssembledFile(
     looksTruncated(assembled, original) ||
     (oLines >= TRUNCATION_MIN_LINES && aLines < oLines * minLineRatio)
   ) {
+    const reason = truncationReason(assembled, original);
+    const detail =
+      reason === "unbalanced-brackets"
+        ? "unbalanced brackets after chunk assembly"
+        : reason === "line-collapse"
+          ? "line collapse"
+          : "shrank below the assembly ratio";
     console.warn(
-      `[bypasser] ⚠ Assembled rewrite of ${filePath} looks truncated (${aLines} vs ${oLines}) — keeping original.`
+      `[bypasser] ⚠ Assembled rewrite of ${filePath} rejected ` +
+        `(${detail}: ${aLines} vs ${oLines} lines) — keeping original.`
     );
     return { content: original, wasInvalid: true, reason: "truncated" };
   }

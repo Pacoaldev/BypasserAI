@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeResponse, looksTruncated, rewriteFile } from "../src/rewriter.js";
+import {
+  sanitizeResponse,
+  looksTruncated,
+  truncationReason,
+  rewriteFile,
+} from "../src/rewriter.js";
 import type { RewriteClient } from "../src/rewriter.js";
 
 /** Minimal mock client that returns a fixed completion for the next call. */
@@ -97,6 +102,48 @@ test("looksTruncated: unbalanced braces are flagged", () => {
   // Drop the final closing brace → unbalanced → truncated.
   const unbalanced = balanced.trimEnd().slice(0, -1);
   assert.equal(looksTruncated(unbalanced, original), true);
+});
+
+// ---------------------------------------------------------------------------
+// truncationReason — distinguish *why* a rewrite was flagged.
+//
+// The old message said "looks truncated" even when the line count had grown
+// (a splice seam with unbalanced brackets). These tests pin the diagnosis so
+// the log names the real failure.
+// ---------------------------------------------------------------------------
+
+test("truncationReason: unbalanced brackets are named as such", () => {
+  const original = "function f() {\n  return 1;\n}\n".repeat(30);
+  const unbalanced = original.trimEnd().slice(0, -1); // drop final closing brace
+  assert.equal(truncationReason(unbalanced, original), "unbalanced-brackets");
+});
+
+test("truncationReason: a balanced but collapsed body is a line collapse", () => {
+  const original = "a\n".repeat(200);
+  const shortened = "a\n".repeat(10);
+  assert.equal(truncationReason(shortened, original), "line-collapse");
+});
+
+test("truncationReason: a longer but unbalanced assembly is NOT a line collapse", () => {
+  // The real incident: the assembled file grew (2872 vs 2865 lines) yet was
+  // flagged. The reason must say "unbalanced-brackets", never "truncated".
+  const original = "function f() {\n  return 1;\n}\n".repeat(30);
+  const grown = original + "function g() {\n  return 2;\n\n"; // extra open block
+  const grownLines = grown.split("\n").length;
+  const origLines = original.split("\n").length;
+  assert.ok(grownLines > origLines, "fixture must be longer than the original");
+  assert.equal(truncationReason(grown, original), "unbalanced-brackets");
+});
+
+test("truncationReason: a clean, balanced rewrite returns null", () => {
+  const original = "function f() {\n  return 1;\n}\n".repeat(30);
+  const rewritten = original.replace(/f\(/g, "handler(");
+  assert.equal(truncationReason(rewritten, original), null);
+});
+
+test("truncationReason: small file below the min-lines floor returns null", () => {
+  const original = "a\nb\nc\n"; // < TRUNCATION_MIN_LINES
+  assert.equal(truncationReason("a\n", original), null);
 });
 
 // ---------------------------------------------------------------------------
