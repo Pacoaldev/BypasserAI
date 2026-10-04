@@ -47,7 +47,7 @@ The detector is fully deterministic — no API calls, works in CI for free. The 
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/your-org/bypasser-ai.git
+git clone https://github.com/Pacoaldev/BypasserAI.git
 cd bypasser-ai
 
 # 2. Install dependencies
@@ -94,8 +94,8 @@ This creates `.bypasser.json` in your project root:
 
 ```json
 {
-  "baseURL": "http://localhost:20128/v1",
-  "model": "zd/claude-sonnet-4-5",
+  "baseURL": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
   "threshold": 0.65,
   "maxTokens": 16384,
   "temperature": 0.4,
@@ -125,7 +125,7 @@ $env:BYPASSER_API_KEY = "sk-..."
 bypasser install
 ```
 
-**Never** run `bypasser install` in **`agent-teams`** (or other repos listed in [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusions-never-bypasser-ai)) — that project keeps its own pre-commit hook; the CLI refuses install there by design.
+**Never** run `bypasser install` in a repo that ships its own pre-commit hook — add it to `BYPASSER_HOOK_EXCLUDED_REPOS` and the CLI refuses install there by design (see [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusions-opt-out-mechanism)).
 
 That's it. From now on, every `git commit` in that project is scanned automatically.
 
@@ -229,8 +229,8 @@ bypasser uninstall
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `baseURL` | `http://localhost:20128/v1` | Any OpenAI-compatible endpoint |
-| `model` | `zd/claude-sonnet-4-5` | Model name for your provider. **Pick a model that returns the fragment at full length** — some models silently return a *compressed* rewrite (~50% of the input, dropping keywords), which the guards then reject, so nothing gets humanized. See the model note below |
+| `baseURL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
+| `model` | `gpt-4o-mini` | Model name for your provider. **Pick a model that returns the fragment at full length** — some models silently return a *compressed* rewrite (~50% of the input, dropping keywords), which the guards then reject, so nothing gets humanized. See the model note below |
 | `threshold` | `0.65` | Score (0–1) above which rewrite triggers |
 | `maxTokens` | `16384` | Max tokens for rewrite response |
 | `temperature` | `0.4` | Sampling temperature for the rewrite (higher = more variation) |
@@ -255,11 +255,11 @@ bypasser uninstall
 > dropping `def`/`for`/`:` and whole statements). The integrity guards then correctly
 > reject it, so the file is committed **unchanged** — the hook runs but never humanizes.
 > Before committing to a model, verify it round-trips a large fragment at full length
-> (output ≈ input line count, declarations intact). The default `zd/claude-sonnet-4-5`
-> was chosen because it returns the fragment at ~1.0× the input size and stays valid.
-> Models that **failed** this check in testing: `ag/claude-sonnet-4-6` (×0.34),
-> `gh/gpt-4o-2024-11-20` (×0.03), `ag/gemini-3-flash` (×0.10),
-> `mistral/magistral-medium-latest` (×0.10), `groq/openai/gpt-oss-20b` (×0.28, corrupt).
+> (output ≈ input line count, declarations intact). The default `gpt-4o-mini` is a
+> safe starting point; for large files prefer a model known to return the fragment at
+> ~1.0× the input size and stay valid. Some models observed to fail this check
+> compress the output to a small fraction of the input (dropping declarations), which
+> the integrity guards then reject.
 
 ### Environment variables
 
@@ -291,7 +291,7 @@ Anything that speaks the OpenAI chat completions protocol works:
 ```json
 {
   "baseURL": "http://localhost:20128/v1",
-  "model": "zd/claude-sonnet-4-5",
+  "model": "claude-sonnet-4-5",
   "threshold": 0.65,
   "maxTokens": 16384,
   "temperature": 0.4,
@@ -412,7 +412,7 @@ A rewrite must **never** silently lose or corrupt a file. On any doubt the origi
 npm run build   # tsc → dist/
 ```
 
-On the author's machine the global `bypasser` is a **junction** pointing back at this repo, so a stale `dist/` means *every* project on the machine runs old logic — the classic "I fixed it but it still breaks" trap. `npm test` (89 tests) and CI (`npm run build`) cover this.
+If you install the CLI globally via `npm link`, the `bypasser` command resolves back to this repo's `dist/`, so a stale `dist/` means projects you run it against use old logic — the classic "I fixed it but it still breaks" trap. `npm test` (115 tests) and CI (`npm run build`) cover this.
 
 
 ---

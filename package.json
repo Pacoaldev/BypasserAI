@@ -28,8 +28,16 @@
     "pre-commit",
     "code-style"
   ],
-  "author": "",
+  "author": "Pacoaldev",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pacoaldev/BypasserAI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Pacoaldev/BypasserAI/issues"
+  },
+  "homepage": "https://github.com/Pacoaldev/BypasserAI#readme",
   "dependencies": {
     "openai": "^4.52.7"
   },

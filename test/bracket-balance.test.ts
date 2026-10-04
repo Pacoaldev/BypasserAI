@@ -7,8 +7,8 @@ import { looksTruncated, sanitizeResponse, lineCollapseOnly } from "../src/rewri
 // ---------------------------------------------------------------------------
 // Regression suite for the "it always uploads the original" incident.
 //
-// Incident: committing `src/utils.py` (≈1600 lines, 74% AI score) in BUSCAPISPro
-// was rejected at EVERY scope — full-file ("unbalanced brackets: 236 vs 235
+// Incident: committing `src/utils.py` (≈1600 lines, 74% AI score) in a real
+// project was rejected at EVERY scope — full-file ("unbalanced brackets: 236 vs 235
 // lines"), diff hunk ("Hunk 646-880 rejected"), and chunk assembly ("unbalanced
 // brackets after chunk assembly: 1809 vs 1809 lines"). The original slop was
 // committed, defeating the whole tool.
@@ -61,7 +61,7 @@ test("balance: Python f-string placeholders are NOT unbalanced", () => {
 });
 
 test("balance: a real Python file with many commented brackets is balanced", () => {
-  // Mirrors real buscapispro/src/utils.py: comments full of .get()/.post()/(...).
+  // Mirrors a real Python module: comments full of .get()/.post()/(...).
   const code = [
     "# OpenAI-compatible providers: prefer a 1-token chat probe (stricter than GET /models).",
     "# FastRouter: GET /v1/models is public (200 sin clave); auth real en /chat/completions.",

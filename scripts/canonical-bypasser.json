@@ -1,6 +1,6 @@
 {
-  "baseURL": "http://localhost:20128/v1",
-  "model": "zd/claude-sonnet-4-5",
+  "baseURL": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
   "threshold": 0.65,
   "maxTokens": 16384,
   "temperature": 0.4,

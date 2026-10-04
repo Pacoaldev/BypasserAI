@@ -11,11 +11,27 @@ import { spawnSync } from "child_process";
 const HOOK_MARKER = "# bypasser-ai";
 
 /**
- * Repositories that must never get a bypasser-ai pre-commit hook (by folder
- * name). `agent-teams` ships its own pre-commit workflow — installing bypasser
- * there breaks that pipeline.
+ * Repositories that must never get a bypasser-ai pre-commit hook, matched by
+ * folder name (lowercased). "No-op by default" — this is a generic mechanism so
+ * any host project that ships its own pre-commit workflow can opt out.
+ *
+ * Populate it per-machine/per-project via the comma-separated
+ * `BYPASSER_HOOK_EXCLUDED_REPOS` env var (e.g.
+ * "my-repo,other-repo"), or add names here if you fork this tool for a
+ * monorepo with a fixed roster.
  */
-export const HOOK_INSTALL_EXCLUDED_REPO_NAMES = new Set(["agent-teams"]);
+function parseExcludedRepos(raw: string | undefined): Set<string> {
+  return new Set(
+    (raw ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+export const HOOK_INSTALL_EXCLUDED_REPO_NAMES = parseExcludedRepos(
+  process.env.BYPASSER_HOOK_EXCLUDED_REPOS
+);
 
 /** True when `bypasser install` must refuse for this working directory. */
 export function isHookInstallExcluded(cwd: string): boolean {
@@ -26,9 +42,8 @@ function assertHookInstallAllowed(cwd: string): void {
   const name = basename(resolve(cwd));
   if (!isHookInstallExcluded(cwd)) return;
   throw new Error(
-    `bypasser-ai hook install is permanently disabled for "${name}". ` +
-      `That repo keeps its own pre-commit hook — do not install or bulk-deploy bypasser there. ` +
-      `See AGENTS.md → "Hook install exclusions".`
+    `bypasser-ai hook install is disabled for "${name}" (listed in ` +
+      `BYPASSER_HOOK_EXCLUDED_REPOS). That repo keeps its own pre-commit hook. `
   );
 }
 

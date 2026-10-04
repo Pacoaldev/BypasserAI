@@ -64,9 +64,9 @@ export interface ThresholdRule {
 }
 
 const DEFAULTS: BypasserConfig = {
-  baseURL: "http://localhost:20128/v1",
+  baseURL: "https://api.openai.com/v1",
   apiKey: "",
-  model: "zd/claude-sonnet-4-5",
+  model: "gpt-4o-mini",
   threshold: 0.65,
   maxTokens: 16384,
   temperature: 0.4,

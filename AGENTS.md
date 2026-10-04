@@ -29,7 +29,7 @@ src/diff-hunks.ts        → parse/merge unified-diff hunk ranges, slice/splice,
 src/chunk-split.ts       → splits a file into chunks at top-level declaration boundaries (per language)
 src/concurrency.ts       → mapPool: bounded-concurrency async pool, order-preserving
 src/git.ts               → one `git diff --cached` per audit (`splitCachedDiffByPath`), staged blob via `git show :path`, restage + `getWorkingTreeFiles()` for `detect --all`
-src/installer.ts         → writes/removes the pre-commit hook; `HOOK_INSTALL_EXCLUDED_REPO_NAMES` (e.g. `agent-teams`)
+src/installer.ts         → writes/removes the pre-commit hook; `HOOK_INSTALL_EXCLUDED_REPO_NAMES` (opt-out list, `BYPASSER_HOOK_EXCLUDED_REPOS`)
 src/audit.ts             → full pipeline: detect → rewrite → restage → log → notify
 src/logger.ts            → appends .bypasser.log + persists rewrite hashes and detection cache in .bypasser.state.json
 src/notifier.ts          → Windows toast notifications (BurntToast → WinRT → balloon, detached)
@@ -57,7 +57,7 @@ npm run format     # prettier
 
 ### ⚠️ After changing `src/`, run `npm run build` — or the hook runs stale code
 
-`dist/` is **gitignored** (not versioned); the CLI a project actually executes is `dist/cli.js`. On the author's machine the globally-linked `bypasser` resolves through a **junction** (`npm/node_modules/bypasser-ai` → this repo), so **every project on the machine runs this repo's local `dist/`**. Consequences:
+`dist/` is **gitignored** (not versioned); the CLI a project actually executes is `dist/cli.js`. When the CLI is linked globally (`npm link`, or a junction on Windows pointing `npm/node_modules/bypasser-ai` → this repo), **every project that invokes `bypasser` runs this repo's local `dist/`**. Consequences:
 
 - Editing `src/*.ts` does **nothing** for any project until `npm run build` regenerates `dist/`. A stale `dist/` means the hook runs old logic everywhere.
 - `git clone` + point the junction/hook at the repo **without** building ⇒ stale `dist/` (the classic "I fixed it but it still breaks" trap).
@@ -84,15 +84,13 @@ bypasser install
 bypasser uninstall
 ```
 
-### Hook install exclusions (never bypasser-ai)
+### Hook install exclusions (opt-out mechanism)
 
-These repositories **must never** receive `bypasser install`, bulk hook rollout, or `.bypasser.json` sync — they keep their own pre-commit workflow:
+Some repositories ship their **own** pre-commit workflow and must **never** receive `bypasser install`, bulk hook rollout, or `.bypasser.json` sync — bypasser would conflict with or overwrite their hook.
 
-| Repo folder | Reason |
-|-------------|--------|
-| **`agent-teams`** | Own `pre-commit` hook; bypasser would conflict or overwrite it |
+This is a generic opt-out, not tied to any specific repo. List the folder names (lowercased, comma-separated) in the `BYPASSER_HOOK_EXCLUDED_REPOS` environment variable — e.g. `BYPASSER_HOOK_EXCLUDED_REPOS="my-repo,other-repo"`. For a fixed monorepo roster, add names to the default set in `src/installer.ts`.
 
-Enforced in code: `HOOK_INSTALL_EXCLUDED_REPO_NAMES` in `src/installer.ts` (`isHookInstallExcluded()`). `bypasser install` inside `agent-teams` throws; `bypasser uninstall` still works if our hook was installed by mistake. Agents running mass `bypasser install` under `PROYECTOS` must **skip** this directory.
+Enforced in code: `HOOK_INSTALL_EXCLUDED_REPO_NAMES` in `src/installer.ts` (`isHookInstallExcluded()`). `bypasser install` inside an excluded repo throws; `bypasser uninstall` still works if our hook was installed by mistake. Agents running mass `bypasser install` under `PROYECTOS` must **skip** those directories.
 
 ```bash
 # Manually detect AI patterns in staged files
@@ -124,13 +122,13 @@ The installed hook invokes `audit --pre-commit` **without** `--verbose`. Audit f
 
 The tool reads `.bypasser.json` at the project root. All fields are optional; missing keys are filled from `DEFAULTS` in `src/config.ts` at runtime.
 
-**Effective defaults** (also in `scripts/canonical-bypasser.json` for bulk sync — copy into host projects, **never** into `agent-teams`):
+**Effective defaults** (also in `scripts/canonical-bypasser.json` for bulk sync — copy into host projects, **never** into a repo listed in `BYPASSER_HOOK_EXCLUDED_REPOS`):
 
 
 ```json
 {
-  "baseURL": "http://localhost:20128/v1",
-  "model": "zd/claude-sonnet-4-5",
+  "baseURL": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
   "threshold": 0.65,
   "maxTokens": 16384,
   "temperature": 0.4,
@@ -165,7 +163,7 @@ Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_U
 
 `bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates a **starter** file from `src/cli.ts` (core rewrite knobs; timeout/`maxFileLines` fields may be omitted — runtime still uses `DEFAULTS`). For a complete on-disk template, use `scripts/canonical-bypasser.json`. `init` also appends `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
 
-Default model **`zd/claude-sonnet-4-5`** is the calibrated choice for large files/chunks; keep it unless you re-validate truncation on your endpoint.
+Default model **`gpt-4o-mini`** is the shipped baseline; for large files/chunks prefer a model that returns the fragment at full length and re-validate truncation on your endpoint.
 
 Built-in ignore globs (`BUILT_IN_IGNORE` in `config.ts`) always skip lockfiles, `dist/**`, minified assets, most `*.json`/`*.yaml`, and bypasser artifacts (`*.bak`, `*.bypasser.tmp`).
 
