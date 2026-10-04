@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hasUnbalancedBrackets } from "../src/bracket-balance.js";
 import { resolveLanguage } from "../src/detector.js";
-import { looksTruncated, sanitizeResponse } from "../src/rewriter.js";
+import { looksTruncated, sanitizeResponse, lineCollapseOnly } from "../src/rewriter.js";
 
 // ---------------------------------------------------------------------------
 // Regression suite for the "it always uploads the original" incident.
@@ -145,3 +145,77 @@ test("sanitizeResponse: a genuinely truncated Python rewrite is still rejected",
   assert.equal(result.wasInvalid, true);
   assert.equal(result.content, original);
 });
+
+// ---------------------------------------------------------------------------
+// Fragment scoping (`isFragment`): a diff/chunk slice is an arbitrary line
+// range of the file, so it legitimately begins/ends mid-block with unbalanced
+// brackets. Requiring zero imbalance on a fragment rejected valid rewrites of
+// ANY large Python/JS file whose hunk cut inside a multi-line call — the
+// "scanner_app.py: 83% · skipped (rewrite rejected (unbalanced brackets))"
+// incident, where the whole file was balanced but every slice was not.
+//
+// The rule mirrors the existing "do not parse isolated fragments" contract for
+// `checkSyntax`: fragment-level checks must not require whole-file invariants.
+// ---------------------------------------------------------------------------
+
+function pythonSliceUnbalanced(): { fragment: string; rewritten: string } {
+  // A slice that starts on a closing `)` and ends right after an opening `(`:
+  // balanced as part of the file, but NOT balanced in isolation.
+  const fragment = [
+    '    parser.add_argument("--flag", help="do the thing")',
+    ')',
+    "",
+    "def build_parser():",
+    "    parser = argparse.ArgumentParser()",
+    "    parser.add_argument(",
+  ].join("\n");
+  const rewritten = [
+    '    parser.add_argument("--flag", help="do the thing")',
+    ")",
+    "",
+    "def build_parser():",
+    "    parser = argparse.ArgumentParser()",
+    "    parser.add_argument(",
+  ].join("\n");
+  return { fragment, rewritten };
+}
+
+test("isFragment: an unbalanced bracket fragment is NOT rejected", () => {
+  const { fragment, rewritten } = pythonSliceUnbalanced();
+  // Sanity: the fragment really is unbalanced on its own.
+  assert.equal(bal(fragment, "src/scanner_app.py"), true);
+  const result = sanitizeResponse(rewritten, fragment, "src/scanner_app.py", "stop", true);
+  assert.equal(
+    result.wasInvalid,
+    false,
+    "a mid-block slice must not be rejected for brackets it cannot balance alone"
+  );
+  assert.equal(result.content, rewritten);
+});
+
+test("isFragment: default (whole file) still rejects an unbalanced response", () => {
+  const { fragment, rewritten } = pythonSliceUnbalanced();
+  // Same content, but with isFragment=false it IS the whole file → must reject.
+  const result = sanitizeResponse(rewritten, fragment, "src/scanner_app.py", "stop", false);
+  assert.equal(result.wasInvalid, true);
+  assert.equal(result.content, fragment);
+});
+
+test("isFragment: line-collapse half stays active on a fragment", () => {
+  const { fragment } = pythonSliceUnbalanced();
+  // A fragment that collapses far past the ratio is still a cut-off tail.
+  const collapsed = fragment.split("\n").slice(0, 1).join("\n");
+  const result = sanitizeResponse(collapsed, fragment, "src/scanner_app.py", "stop", true);
+  assert.equal(result.wasInvalid, true);
+  assert.equal(result.content, fragment);
+});
+
+test("lineCollapseOnly: ignores brackets, still flags a real collapse", () => {
+  const original = Array.from({ length: 40 }, (_, i) => `line_${i} = ${i}`).join("\n");
+  const collapsed = "line_0 = 0";
+  assert.equal(lineCollapseOnly(collapsed, original, "stop"), true);
+  // Brackets are irrelevant here: an unbalanced-but-full-length rewrite passes.
+  const unbalancedFull = original + "\ndef broken(";
+  assert.equal(lineCollapseOnly(unbalancedFull, original, "stop"), false);
+});
+

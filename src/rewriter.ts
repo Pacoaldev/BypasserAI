@@ -159,6 +159,24 @@ export function looksTruncated(
 }
 
 /**
+ * Line-collapse half of `looksTruncated` only — no bracket check.
+ *
+ * Used for diff/chunk *fragments*, whose line range is arbitrary and therefore
+ * not expected to be bracket-balanced on its own. See `sanitizeResponse`.
+ */
+export function lineCollapseOnly(
+  rewritten: string,
+  original: string,
+  finishReason?: string
+): boolean {
+  const originalLines = original.split("\n").length;
+  if (originalLines < TRUNCATION_MIN_LINES) return false;
+  const rewrittenLines = rewritten.split("\n").length;
+  const ratio = finishReason === "stop" ? COMPRESSION_LINE_RATIO : TRUNCATION_LINE_RATIO;
+  return rewrittenLines < originalLines * ratio;
+}
+
+/**
  * Diagnostic for a rejected rewrite: *why* `looksTruncated` flagged it.
  *
  * `looksTruncated` collapses two independent conditions into one boolean, so
@@ -167,15 +185,19 @@ export function looksTruncated(
  * assembly is usually a splice seam, not a token cutoff), so the log message
  * must name the real one.
  *
+ * `isFragment` skips the bracket half for the same reason `sanitizeResponse`
+ * does: an isolated slice is not expected to be bracket-balanced.
+ *
  * Returns `null` when the rewrite is not flagged at all.
  */
 export function truncationReason(
   rewritten: string,
   original: string,
   finishReason?: string,
-  filePath?: string
+  filePath?: string,
+  isFragment = false
 ): "unbalanced-brackets" | "line-collapse" | null {
-  if (hasUnbalancedBrackets(rewritten, resolveLanguage(filePath, rewritten)))
+  if (!isFragment && hasUnbalancedBrackets(rewritten, resolveLanguage(filePath, rewritten)))
     return "unbalanced-brackets";
 
   const originalLines = original.split("\n").length;
@@ -204,7 +226,8 @@ export function sanitizeResponse(
   raw: string,
   original: string,
   filePath: string,
-  finishReason?: string
+  finishReason?: string,
+  isFragment = false
 ): { content: string; wasInvalid: boolean; reason?: InvalidReason } {
   // 0. A `length` finish reason means the model was cut off mid-generation.
   //    Never trust the content — it is missing an unknown amount of the tail.
@@ -254,8 +277,26 @@ export function sanitizeResponse(
   //    of a large file (see looksTruncated). `finishReason` is threaded through
   //    so a clean stop tolerates legitimate compression while an unknown end
   //    keeps the strict ratio.
-  if (looksTruncated(withoutPathHeader, original, finishReason, filePath)) {
-    const reason = truncationReason(withoutPathHeader, original, finishReason, filePath);
+  //
+  //    `isFragment` skips the *bracket* half of the check: a diff/chunk slice is
+  //    an arbitrary line range of the file, so it legitimately begins/ends
+  //    mid-block with unbalanced brackets. Requiring zero imbalance there is the
+  //    false positive that rejected valid rewrites of any large Python/JS file
+  //    whose hunk cut inside a multi-line call — same reasoning as "do not parse
+  //    isolated fragments" for `checkSyntax`. The assembled file is still
+  //    bracket-checked as a whole in `validateAssembledFile`. The line-collapse
+  //    half stays active (a fragment may not collapse beyond the ratio).
+  const completenessFailed = isFragment
+    ? lineCollapseOnly(withoutPathHeader, original, finishReason)
+    : looksTruncated(withoutPathHeader, original, finishReason, filePath);
+  if (completenessFailed) {
+    const reason = truncationReason(
+      withoutPathHeader,
+      original,
+      finishReason,
+      filePath,
+      isFragment
+    );
     console.warn(
       `[bypasser] ⚠ Rewrite of ${filePath} rejected ` +
         `(${reason === "unbalanced-brackets" ? "unbalanced brackets" : "line collapse"}: ` +
@@ -398,9 +439,10 @@ function finalizeRewrite(
   filePath: string,
   finishReason: string | undefined,
   config: BypasserConfig,
-  minLineRatio = TRUNCATION_LINE_RATIO
+  minLineRatio = TRUNCATION_LINE_RATIO,
+  isFragment = false
 ): { content: string; wasInvalid: boolean; reason?: InvalidReason } {
-  const sanitized = sanitizeResponse(raw, original, filePath, finishReason);
+  const sanitized = sanitizeResponse(raw, original, filePath, finishReason, isFragment);
   if (sanitized.wasInvalid) return sanitized;
 
   // `sanitizeResponse` already ran the completeness guard with the
@@ -609,7 +651,9 @@ async function rewriteByDiff(
       raw,
       filePath,
       finishReason,
-      config
+      config,
+      TRUNCATION_LINE_RATIO,
+      true
     );
     if (wasInvalid) {
       console.warn(
@@ -663,7 +707,9 @@ async function rewriteByChunksInner(
       raw,
       filePath,
       finishReason,
-      config
+      config,
+      TRUNCATION_LINE_RATIO,
+      true
     );
     if (wasInvalid) {
       console.warn(
