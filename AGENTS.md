@@ -1,6 +1,6 @@
 # BypasserAI (agent instructions)
 
-This repository is the **bypasser-ai** tool: a Node.js/TypeScript pre-commit hook and CLI that detects AI-generated code patterns in staged git diffs and rewrites them via any OpenAI-compatible API. It also contains the **humanizer** skill (`docs/SKILL.md`) that drives the rewriting.
+This repository is the **bypasser-ai** tool: a Node.js/TypeScript pre-commit hook and CLI that scores **full staged file content** for AI-generated patterns (git diffs gate eligibility and choose rewrite scope) and rewrites flagged files via any OpenAI-compatible API. It also contains the **humanizer** skill (`docs/SKILL.md`) that drives the rewriting.
 
 No scripts beyond the tool itself, no external runtime dependencies beyond Node ≥ 18 and the `openai` SDK. Language-agnostic — works on any project regardless of the code being committed.
 
@@ -23,19 +23,23 @@ src/detector.ts          → deterministic AI-pattern scorer (no API, six signal
 src/rewriter.ts          → calls OpenAI-compatible API using docs/SKILL.md as system prompt; full-file / diff-hunk / chunk strategies + response sanitizer
 src/rewrite-constants.ts → shared truncation/compression ratios (used by rewriter + restageFile)
 src/rewrite-validate.ts  → post-rewrite validators: looksIndentBroken, looksStructurallyBroken
+src/syntax-guard.ts      → best-effort parse check (Python via interpreter, JSON via JSON.parse) on assembled/full rewrites
 src/diff-hunks.ts        → parse/merge unified-diff hunk ranges, slice/splice, addedLineFraction
 src/chunk-split.ts       → splits a file into chunks at top-level declaration boundaries (per language)
 src/concurrency.ts       → mapPool: bounded-concurrency async pool, order-preserving
-src/git.ts               → reads staged diff via `git show :path`, writes rewritten content back and re-stages; `getWorkingTreeFiles()` for `detect --all`
-src/installer.ts         → writes/removes the pre-commit hook in .git/hooks/
+src/git.ts               → one `git diff --cached` per audit (`splitCachedDiffByPath`), staged blob via `git show :path`, restage + `getWorkingTreeFiles()` for `detect --all`
+src/installer.ts         → writes/removes the pre-commit hook; `HOOK_INSTALL_EXCLUDED_REPO_NAMES` (e.g. `agent-teams`)
 src/audit.ts             → full pipeline: detect → rewrite → restage → log → notify
 src/logger.ts            → appends .bypasser.log + persists rewrite hashes and detection cache in .bypasser.state.json
 src/notifier.ts          → Windows toast notifications (BurntToast → WinRT → balloon, detached)
 src/index.ts             → public library exports
 docs/SKILL.md            → humanizer skill prompt loaded at runtime by src/rewriter.ts
+scripts/canonical-bypasser.json → full default knobs for bulk `.bypasser.json` sync (skip excluded repos)
 scripts/test.js          → cross-platform test runner (resolves test files, requires Node >= 20.6 for tsx --import)
 test/                    → node:test suites (run via scripts/test.js)
 ```
+
+`src/index.ts` exports the public library surface (detector, rewriter, audit, config, git, install helpers including `isHookInstallExcluded`).
 
 ## Commands
 
@@ -104,13 +108,23 @@ bypasser audit --verbose
 
 # Dry run — detect only, no API calls
 bypasser audit --dry-run
+
+# What the pre-commit hook runs (compact summary; use BYPASSER_VERBOSE=1 for detail)
+bypasser audit --pre-commit
 ```
+
+The installed hook invokes `audit --pre-commit` **without** `--verbose`. Audit failures and safety rejections **never block** the commit (`process.exit(0)`); check `.bypasser.log` and the hook summary line for `rejected` / API errors.
+
+`detect` uses the same **full-file** scoring as audit (not diff-only), so scores match what the hook would see after staging.
 
 ---
 
 ## Configuration
 
-The tool reads `.bypasser.json` at the project root. All fields are optional. `bypasser init` writes the full default set:
+The tool reads `.bypasser.json` at the project root. All fields are optional; missing keys are filled from `DEFAULTS` in `src/config.ts` at runtime.
+
+**Effective defaults** (also in `scripts/canonical-bypasser.json` for bulk sync — copy into host projects, **never** into `agent-teams`):
+
 
 ```json
 {
@@ -148,7 +162,11 @@ Key fields (see `src/config.ts` `BypasserConfig` for the source of truth):
 
 Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback. `BYPASSER_VERBOSE=1` forces verbose output for `audit`.
 
-`bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates the file from the built-in defaults. `init` also appends `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
+`bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates a **starter** file from `src/cli.ts` (core rewrite knobs; timeout/`maxFileLines` fields may be omitted — runtime still uses `DEFAULTS`). For a complete on-disk template, use `scripts/canonical-bypasser.json`. `init` also appends `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
+
+Default model **`zd/claude-sonnet-4-5`** is the calibrated choice for large files/chunks; keep it unless you re-validate truncation on your endpoint.
+
+Built-in ignore globs (`BUILT_IN_IGNORE` in `config.ts`) always skip lockfiles, `dist/**`, minified assets, most `*.json`/`*.yaml`, and bypasser artifacts (`*.bak`, `*.bypasser.tmp`).
 
 Any OpenAI-compatible endpoint works: OpenAI, Ollama, LM Studio, OpenRouter, Groq, Anthropic via proxy.
 
@@ -193,7 +211,7 @@ Files at or above the effective threshold (per-glob override via `config.thresho
 
 `src/rewriter.ts` loads `docs/SKILL.md` at runtime and injects it as the system prompt (with an inline fallback if the file is missing). In full-file mode the user message contains the file path and full content; in `diff`/`chunk` modes it receives a numbered fragment and a fragment-mode system prompt, and must return only the rewritten fragment. In all cases the model returns content only — no markdown fences, no explanations.
 
-When editing `src/rewriter.ts`, the temperature comes from `config.temperature` (default `0.4`) — low enough for consistency, high enough for variation. `sanitizeResponse` also strips stray markdown fences and a hallucinated leading path header before validating.
+When editing `src/rewriter.ts`, the temperature comes from `config.temperature` (default `0.4`) — low enough for consistency, high enough for variation. `sanitizeResponse` also strips stray markdown fences and a hallucinated leading path header before validating. `callModel` scales `max_tokens` with fragment size and **retries once** on `finish_reason=length` with a higher cap. Chunk mode **retries with half `maxChunkLines`** when the first pass changed nothing.
 
 ### Detect full file / rewrite scoped
 
@@ -213,6 +231,8 @@ A rewrite must **never** silently lose or corrupt a file. This is a hard invaria
 4. `looksIndentBroken()` (`rewrite-validate.ts`) — rejects a rewrite that systemically flattens indentation (correct tokens, wrong structure).
 5. `looksStructurallyBroken()` (`rewrite-validate.ts`) — rejects a rewrite that drops too many top-level declarations (gated by `structuralCheck`).
 6. `checkSyntax()` (`syntax-guard.ts`) — parses the **assembled** file with a real parser: Python via `compile()` through the `python`/`python3`/`py` interpreter, JSON via `JSON.parse`. Catches a *micro*-misindentation (a single line at the wrong level) that the conservative indent heuristic above deliberately ignores — the exact failure that produced an `IndentationError` in a ~2800-line Python file reassembled from LLM chunks. Best-effort: if no interpreter is found (`unavailable`) or the language has no cheap local parser (`unsupported`), it does **not** block. Applied in `validateAssembledFile()` (the whole-file backstop, which is what actually saves the case) and in `rewriteFullFile()`. New `InvalidReason: "syntax"`. Do **not** parse isolated fragments (a fragment without its parent `def` never parses alone → false rejects).
+
+Chunk/diff assembly uses **`ASSEMBLY_FINISH` (`stop`)** semantics in `looksTruncated` so legitimate comment-stripping compression is not treated like an unknown cutoff. If full assembly checks fail but the spliced file still **parses** and has balanced brackets, `isSafePartialHumanization` keeps the **partial humanized** worktree instead of reverting to the original (`finishChunkOrDiffRewrite`).
 
 All ratios live in `rewrite-constants.ts`. And the write itself is defensive: `restageFile()` (in `git.ts`) refuses empty content over a non-empty file, refuses a severe shrink (severe-shrink floor), copies the current content to `<path>.bak`, writes atomically (temp + rename), and retries `git add` with exponential backoff (`gitAddWithRetry`, 5 attempts) before rolling the worktree back to the backup (`restoreBackup`) so a failed re-stage never leaves a corrupted file. Do not weaken or bypass any of these — `test/rewriter.test.ts`, `test/restage.test.ts`, `test/indent-validate.test.ts`, and `test/syntax-guard.test.ts` lock them in.
 
