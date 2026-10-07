@@ -17,6 +17,7 @@ async function main() {
   switch (command) {
     case "install":
       install(cwd);
+      ensureGitignoreEntries(cwd);
       break;
 
     case "uninstall":
