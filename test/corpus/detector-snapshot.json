@@ -1,0 +1,10 @@
+{
+  "ai-go-service": 0.609,
+  "ai-py-routes": 0.743,
+  "ai-ts-idiomatic": 0.738,
+  "ai-ts-realistic": 0.887,
+  "human-js-messy": 0,
+  "human-php-documented": 0,
+  "human-py-glue": 0,
+  "human-ts-terse": 0
+}

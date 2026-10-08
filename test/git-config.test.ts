@@ -48,6 +48,7 @@ function baseConfig(overrides: Partial<BypasserConfig> = {}): BypasserConfig {
     contextLines: 60,
     maxChunkLines: 450,
     structuralCheck: true,
+    notifications: "auto",
     ...overrides,
   };
 }

@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import type { NotificationMode } from "./config.js";
 
 export interface NotifyOptions {
   title: string;
@@ -235,3 +236,73 @@ export function _resetBurntToastCache(): void {}
 
 /** @deprecated — no longer used; kept as a no-op for external callers. */
 export function _setBurntToastAvailable(_value: boolean): void {}
+
+// ---------------------------------------------------------------------------
+// Cross-platform notification dispatch
+//
+// Windows keeps the queue/VBScript pipeline above (it is the only OS where
+// spawning a notifier from inside a git hook is guaranteed not to flash a
+// console). macOS and Linux get a direct, best-effort shell call. All paths are
+// fire-and-forget: a notification must never delay or fail a commit.
+// ---------------------------------------------------------------------------
+
+/** Notification mode resolved from config. (Re-exported from config.ts.) */
+export type { NotificationMode } from "./config.js";
+
+/** The command that shows a notification on the current platform, or null. */
+export function notificationCommand(
+  platform: NodeJS.Platform,
+  title: string,
+  message: string
+): { cmd: string; args: string[] } | null {
+  if (platform === "darwin") {
+    // AppleScript: escape backslashes and double quotes for the `-e` literal.
+    const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return {
+      cmd: "osascript",
+      args: [
+        "-e",
+        `display notification "${esc(message)}" with title "${esc(title)}"`,
+      ],
+    };
+  }
+  if (platform === "linux") {
+    // notify-send is part of libnotify; the args array avoids shell quoting.
+    return { cmd: "notify-send", args: [title, message] };
+  }
+  return null; // windows handled by notifyWindows(); others: nothing
+}
+
+/**
+ * Platform-agnostic, opt-in notification. Dispatches to the Windows toast
+ * pipeline or a macOS/Linux shell notifier. A no-op when `mode` is `"off"` or
+ * on an unsupported platform. Never throws, never blocks the commit.
+ */
+export function notify(
+  opts: NotifyOptions & { mode?: NotificationMode },
+  deps: NotifyDeps = {}
+): void {
+  if ((opts.mode ?? "auto") === "off") return;
+
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    notifyWindows(opts, deps);
+    return;
+  }
+
+  const command = notificationCommand(platform, opts.title, opts.message);
+  if (!command) return;
+
+  try {
+    const spawnFn = deps.spawnFn ?? spawn;
+    const child = spawnFn(command.cmd, command.args, {
+      stdio: "ignore",
+      detached: true,
+    });
+    // Detach so the notifier outlives the hook process; ignore is requested but
+    // guard anyway since a missing stdio array can still yield a stream.
+    child.unref?.();
+  } catch {
+    // never block the commit because of a notification
+  }
+}

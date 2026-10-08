@@ -1,6 +1,6 @@
 import { detectAI, countChangedLines } from "./detector.js";
 import { rewriteFile, createRewriteClient, contentHash } from "./rewriter.js";
-import { getStagedFiles, restageFile } from "./git.js";
+import { getStagedFiles, restageFile, getTrackedFiles } from "./git.js";
 import {
   loadConfig,
   resolveThreshold,
@@ -10,12 +10,15 @@ import {
 import { matchGlob } from "./git.js";
 import {
   writeLog,
+  writeAuditEvent,
+  saveBypasserState,
   loadBypasserState,
-  recordRewrite,
-  recordDetection,
+  recordRewriteInMemory,
+  recordDetectionInMemory,
   cachedDetectionScore,
+  pruneState,
 } from "./logger.js";
-import { notifyWindows } from "./notifier.js";
+import { notify } from "./notifier.js";
 import { addedLineFraction } from "./diff-hunks.js";
 import { mapPool } from "./concurrency.js";
 import type { DetectorResult } from "./detector.js";
@@ -37,11 +40,52 @@ export interface AuditResult {
   rewrittenFiles: number;
   errorFiles: number;
   rejectedFiles: number;
+  /**
+   * Files that were *above threshold and not humanized* — either the rewrite
+   * was rejected by a safety guard or the API call failed. These are the files
+   * `--strict` treats as a failure: the commit still contains AI-shaped code
+   * the pipeline could not improve. Empty on a clean run.
+   */
+  unresolvedFiles: FileAuditResult[];
 }
 
 function scoreBar(score: number): string {
   const filled = Math.round(score * 10);
   return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]";
+}
+
+/**
+ * Files the audit flagged as AI-shaped (score at/above their effective
+ * threshold) but could not humanize — the set `--strict` gates CI on.
+ *
+ * A clean file has `score < threshold`; a file skipped for being too large or
+ * for having too few changed lines is never scored as AI (score 0) and so never
+ * lands here. This leaves exactly the files where detection said "this is AI"
+ * and the pipeline failed to fix it (guard rejection or API error).
+ */
+export function selectUnresolvedFiles(files: FileAuditResult[]): FileAuditResult[] {
+  return files.filter((f) => !f.rewritten && f.score >= f.threshold);
+}
+
+/**
+ * Reduce a base URL to its host for the structured log — never persisting a
+ * path/query that might carry a key embedded by a proxy setup.
+ */
+export function providerHost(baseURL: string): string {
+  try {
+    return new URL(baseURL).host || baseURL;
+  } catch {
+    return baseURL;
+  }
+}
+
+/** Coarse status bucket recorded per file in the structured log. */
+export function auditFileStatus(f: FileAuditResult): string {
+  if (f.rewritten) return "rewritten";
+  if (f.skippedReason?.startsWith("rewrite error")) return "error";
+  if (f.skippedReason?.startsWith("rewrite rejected")) return "rejected";
+  if (f.skippedReason) return "skipped";
+  return f.score >= f.threshold ? "unresolved" : "ok";
 }
 
 interface PendingRewrite {
@@ -128,7 +172,7 @@ export async function runAudit(opts: {
       detection = { score: cachedScore, signals: [] };
     } else {
       detection = detectAI(file.content, file.path);
-      bypasserState = recordDetection(cwd, file.path, hash, detection.score, bypasserState);
+      bypasserState = recordDetectionInMemory(bypasserState, file.path, hash, detection.score);
     }
 
     if (opts.verbose) {
@@ -179,11 +223,17 @@ export async function runAudit(opts: {
 
     for (const outcome of rewriteOutcomes) {
       if (outcome.hash) {
-        bypasserState = recordRewrite(cwd, outcome.path, outcome.hash, bypasserState);
+        bypasserState = recordRewriteInMemory(bypasserState, outcome.path, outcome.hash);
       }
       results.push(outcome.result);
     }
   }
+
+  // Prune state entries for files that no longer exist in the repo, then persist
+  // the whole state ONCE. Writing per-file (the old behaviour) meant N full
+  // synchronous writes per audit — see logger.ts.
+  bypasserState = pruneState(bypasserState, getTrackedFiles(cwd)).state;
+  saveBypasserState(cwd, bypasserState);
 
   const rewrittenFiles = results.filter((r) => r.rewritten).length;
   const errorFiles = results.filter((r) => r.skippedReason?.startsWith("rewrite error")).length;
@@ -191,16 +241,23 @@ export async function runAudit(opts: {
     r.skippedReason?.startsWith("rewrite rejected")
   ).length;
 
+  // Files the pipeline flagged as AI-shaped (score at/above their threshold)
+  // but could not humanize. A clean file has score < threshold and never lands
+  // here; a file skipped for size/few-lines was never scored as AI, so it does
+  // not either. Used by `--strict` to gate CI.
+  const unresolvedFiles = selectUnresolvedFiles(results);
+
   const result: AuditResult = {
     files: results,
     totalFiles: results.length,
     rewrittenFiles,
     errorFiles,
     rejectedFiles,
+    unresolvedFiles,
   };
 
   if (results.length > 0) {
-    _writeLogAndNotify(cwd, result);
+    _writeLogAndNotify(cwd, config, result);
   }
 
   return result;
@@ -268,7 +325,11 @@ async function processRewrite(
   }
 }
 
-function _writeLogAndNotify(cwd: string, result: AuditResult): void {
+function _writeLogAndNotify(
+  cwd: string,
+  config: BypasserConfig,
+  result: AuditResult
+): void {
   const logLines: string[] = [];
 
   for (const f of result.files) {
@@ -306,29 +367,55 @@ function _writeLogAndNotify(cwd: string, result: AuditResult): void {
 
   writeLog(cwd, logLines);
 
+  // Structured sidecar for `bypasser stats`. Best-effort and never blocking.
+  // The provider is reduced to its host so a key embedded in the URL (some
+  // proxies) can never be persisted.
+  writeAuditEvent(cwd, {
+    ts: new Date().toISOString().replace("T", " ").slice(0, 19),
+    iso: new Date().toISOString(),
+    provider: providerHost(config.baseURL),
+    model: config.model,
+    totalFiles: result.totalFiles,
+    rewrittenFiles: result.rewrittenFiles,
+    rejectedFiles: result.rejectedFiles,
+    errorFiles: result.errorFiles,
+    files: result.files.map((f) => ({
+      path: f.path,
+      score: f.score,
+      threshold: f.threshold,
+      status: auditFileStatus(f),
+      reason: f.skippedReason,
+    })),
+  });
+
+  const mode = config.notifications;
   if (result.rewrittenFiles > 0) {
-    notifyWindows({
+    notify({
       title: "BypasserAI — Humanized",
       message: `${result.rewrittenFiles} file(s) rewritten before commit.`,
       type: "warning",
+      mode,
     });
   } else if (result.errorFiles > 0) {
-    notifyWindows({
+    notify({
       title: "BypasserAI — Rewrite failed",
       message: `${result.errorFiles} file(s) needed rewriting but the API call failed. Check .bypasser.log.`,
       type: "error",
+      mode,
     });
   } else if (result.rejectedFiles > 0) {
-    notifyWindows({
+    notify({
       title: "BypasserAI — Rewrite rejected",
       message: `${result.rejectedFiles} file(s) failed safety checks; originals kept.`,
       type: "warning",
+      mode,
     });
   } else {
-    notifyWindows({
+    notify({
       title: "BypasserAI — Clean",
       message: `${result.totalFiles} file(s) scanned. All ok.`,
       type: "info",
+      mode,
     });
   }
 }

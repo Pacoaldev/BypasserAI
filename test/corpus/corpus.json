@@ -1,0 +1,61 @@
+{
+  "$comment": "Annotated detector corpus. Each entry is scored by whatever it says (model/text), so a model may pass despite a regex changing. When regexes change, this is how the behavioural impact is measured. Add new entries with real code, never toy snippets. Set corpus snapshots via `BYPASSER_UPDATE_SNAPSHOT=1 npm run bench`.",
+  "samples": [
+    {
+      "id": "ai-ts-realistic",
+      "label": "ai",
+      "lang": "typescript",
+      "path": "src/api.ts",
+      "code": "import { createClient } from './client';\n\n/**\n * Initializes the database connection.\n * @param url The connection URL.\n * @returns The database client.\n */\nexport const initializeDatabase = async (url) => {\n  // Validate the input URL\n  if (!url) {\n    throw new Error('URL is required');\n  }\n  // Create the client\n  const client = await createClient(url);\n  return client;\n};\n\n/**\n * Fetches the user profile.\n */\nexport const fetchUserProfile = async (userId) => {\n  if (!userId) {\n    return null;\n  }\n  const response = await fetch('/users/' + userId);\n  return response.json();\n};\n\n/**\n * Processes the user data.\n */\nexport const processUserData = (data) => {\n  const result = Object.keys(data).map((key) => data[key]);\n  return result;\n};"
+    },
+    {
+      "id": "ai-ts-idiomatic",
+      "label": "ai",
+      "lang": "typescript",
+      "path": "src/git.ts",
+      "code": "import { execFileSync } from 'child_process';\nimport { resolve } from 'path';\n\n/**\n * Runs a git command and returns its stdout.\n * Uses an argv array to avoid shell quoting issues.\n */\nfunction git(args, cwd) {\n  return execFileSync('git', args, { cwd, encoding: 'utf8' });\n}\n\n/**\n * Reads the staged files from the index.\n */\nexport function getStagedFiles(cwd, config) {\n  const raw = git(['diff', '--cached', '--name-only'], cwd).trim();\n  if (!raw) return [];\n  const files = raw.split('\\n');\n  const result = [];\n  for (const filePath of files) {\n    // Read the staged version for this file\n    const content = git(['show', filePath], cwd);\n    result.push({ path: filePath, content });\n  }\n  return result;\n}\n\n/**\n * Builds a fake unified diff for an untracked file.\n */\nexport function synthesizeAddedDiff(filePath, content) {\n  const body = content.split('\\n').map((line) => `+${line}`).join('\\n');\n  return `--- /dev/null\\n+++ b/${filePath}\\n${body}`;\n}\n\n/**\n * Returns the working-tree files that differ from HEAD.\n */\nexport function getWorkingTreeFiles(cwd, config) {\n  const tracked = git(['diff', 'HEAD', '--name-only'], cwd);\n  const untracked = git(['ls-files', '--others'], cwd);\n  // Combine and de-duplicate the two lists\n  const paths = [...tracked.split('\\n'), ...untracked.split('\\n')];\n  return [...new Set(paths)].filter(Boolean);\n}"
+    },
+    {
+      "id": "ai-py-routes",
+      "label": "ai",
+      "lang": "python",
+      "path": "src/clientseeker/api/routes/leads.py",
+      "code": "\"\"\"API routes for leads and exports.\"\"\"\n\nfrom __future__ import annotations\n\nfrom fastapi import APIRouter, HTTPException, Query\n\nfrom clientseeker.domain.models import Lead\nfrom clientseeker.infrastructure.persistence import load_json, save_json\n\nrouter = APIRouter()\n\ndef save_leads() -> None:\n    \"\"\"Save leads to persistent storage.\"\"\"\n    save_json(\"leads.json\", _leads)\n\n@router.get(\"\", response_model=list[Lead])\nasync def list_leads(\n    search_run_id: str | None = None,\n    min_score: float = Query(0.0, ge=0.0, le=1.0),\n) -> list[Lead]:\n    \"\"\"List leads, optionally filtered by search run and minimum score.\"\"\"\n    if search_run_id:\n        results = _leads.get(search_run_id, [])\n    else:\n        results = [lead for leads in _leads.values() for lead in leads]\n\n    return [lead for lead in results if lead.relevance and lead.relevance.overall >= min_score]\n\n@router.get(\"/{lead_id}\", response_model=Lead)\nasync def get_lead(lead_id: str) -> Lead:\n    \"\"\"Get a specific lead by ID.\"\"\"\n    for leads in _leads.values():\n        for lead in leads:\n            if lead.id == lead_id:\n                return lead\n    raise HTTPException(status_code=404, detail=\"Lead not found\")\n\n@router.post(\"\", response_model=Lead, status_code=201)\nasync def create_lead(payload: LeadCreate) -> Lead:\n    \"\"\"Create a new lead and persist it.\"\"\"\n    lead = Lead(**payload.dict())\n    _leads.setdefault(payload.search_run_id, []).append(lead)\n    save_leads()\n    return lead"
+    },
+    {
+      "id": "human-ts-terse",
+      "label": "human",
+      "lang": "typescript",
+      "path": "src/data.ts",
+      "code": "import { db } from './db';\n\n// fetch + cache\nconst cache = new Map();\n\nasync function getUser(id) {\n  if (cache.has(id)) {\n    return cache.get(id);\n  } else {\n    const r = await db.query(id);\n    if (r) cache.set(id, r);\n    return r;\n  }\n}\n\nfunction calc(items) {\n  let t = 0;\n  for (let i = 0; i < items.length; i++) {\n    t += items[i].v;\n  }\n  return t;\n}\n\nconst x = getUser(1);\nconst y = calc(arr);\nconsole.log(x, y);"
+    },
+    {
+      "id": "human-php-documented",
+      "label": "human",
+      "lang": "php",
+      "path": "app/Models/Reservation.php",
+      "code": "<?php\n\nnamespace App\\Models;\n\nuse Illuminate\\Database\\Eloquent\\Model;\n\n/**\n * Reserva de una mesa en un intervalo [starts_at, ends_at).\n *\n * Contiguas (fin de A == inicio de B) NO se solapan: la query de conflicto\n * usará starts_at < nuevo_fin AND ends_at > nuevo_inicio.\n */\nclass Reservation extends Model\n{\n    /**\n     * @var list<string>\n     */\n    protected $fillable = ['table_id', 'starts_at', 'ends_at', 'status'];\n\n    /**\n     * @return array<string, string>\n     */\n    protected function casts(): array\n    {\n        return [\n            'starts_at' => 'datetime',\n            'ends_at' => 'datetime',\n        ];\n    }\n\n    /**\n     * Solo reservas que bloquean la mesa (pending + confirmed).\n     */\n    public function scopeActive(Builder $query): Builder\n    {\n        return $query->whereIn('status', array_map(\n            static fn (ReservationStatus $status) => $status->value,\n            ReservationStatus::active(),\n        ));\n    }\n\n    /**\n     * Reservas cuyo intervalo intersecta el día indicado.\n     */\n    public function scopeOnDate(Builder $query, string|\\DateTimeInterface $date): Builder\n    {\n        $day = Carbon::parse($date)->startOfDay();\n        return $query\n            ->where('starts_at', '<', $day->copy()->endOfDay())\n            ->where('ends_at', '>', $day);\n    }\n}"
+    },
+    {
+      "id": "human-js-messy",
+      "label": "human",
+      "lang": "javascript",
+      "path": "lib/parse.js",
+      "code": "var fs = require('fs');\nvar toks = [];\n\nfunction lex(src) {\n  var i = 0;\n  while (i < src.length) {\n    var c = src[i];\n    if (c === ' ' || c === '\\n') { i++; continue; }\n    if (c === '(' || c === ')') {\n      toks.push(c);\n      i++;\n      continue;\n    }\n    throw new Error('bad char ' + c + ' at ' + i);\n  }\n  return toks;\n}\n\nfunction dump() {\n  for (var k = 0; k < toks.length; k++) {\n    console.log(k, toks[k]);\n  }\n}\n\nvar src = fs.readFileSync(process.argv[2], 'utf8');\nlex(src);\ndump();"
+    },
+    {
+      "id": "human-py-glue",
+      "label": "human",
+      "lang": "python",
+      "path": "tools/run.py",
+      "code": "import os\nimport sys\nimport json\n\n\ndef load(p):\n    with open(p) as f:\n        return json.load(f)\n\n\ndef main(argv):\n    if len(argv) < 2:\n        print('usage: run.py FILE', file=sys.stderr)\n        return 2\n    d = load(argv[1])\n    for k, v in d.items():\n        print(k, '=', v)\n    return 0\n\n\nif __name__ == '__main__':\n    sys.exit(main(sys.argv))"
+    },
+    {
+      "id": "ai-go-service",
+      "label": "ai",
+      "lang": "go",
+      "path": "internal/user/service.go",
+      "code": "package user\n\nimport (\n\t\"context\"\n\t\"errors\"\n)\n\n// UserService provides operations for managing users.\ntype UserService struct {\n\trepo UserRepository\n}\n\n// NewUserService creates a new instance of UserService.\nfunc NewUserService(repo UserRepository) *UserService {\n\treturn &UserService{repo: repo}\n}\n\n// GetUser retrieves a user by their unique identifier.\nfunc (s *UserService) GetUser(ctx context.Context, id string) (*User, error) {\n\tif id == \"\" {\n\t\treturn nil, errors.New(\"user ID cannot be empty\")\n\t}\n\tuser, err := s.repo.FindByID(ctx, id)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn user, nil\n}\n\n// ProcessUserData processes the user data and returns the result.\nfunc (s *UserService) ProcessUserData(ctx context.Context, data []byte) ([]byte, error) {\n\ttransformedData, err := transformData(data)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn transformedData, nil\n}"
+    }
+  ]
+}

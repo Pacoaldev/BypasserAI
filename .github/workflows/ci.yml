@@ -37,5 +37,13 @@ jobs:
         if: matrix.node-version != '18.x'
         run: npm test
 
+      # Detector calibration report + golden snapshot. The snapshot test already
+      # runs inside `npm test`; running the bench here surfaces the precision /
+      # recall / F1 summary in the CI log so a drift is visible, not just a red
+      # check. Only on the primary Node version to avoid noise.
+      - name: Detector benchmark
+        if: matrix.node-version == '20.x'
+        run: npm run bench
+
       - name: Build
         run: npm run build

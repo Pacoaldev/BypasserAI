@@ -52,7 +52,16 @@ export interface BypasserConfig {
   maxChunkLines: number;
   /** Reject rewrites that drop too many top-level declarations. Default true */
   structuralCheck: boolean;
+  /**
+   * Desktop notification behaviour after an audit.
+   *   - `auto` (default): show a toast on Windows / a shell notification on
+   *     macOS and Linux.
+   *   - `off`: never notify (useful in CI, headless boxes, or noisy terminals).
+   */
+  notifications: NotificationMode;
 }
+
+export type NotificationMode = "auto" | "off";
 
 export type RewriteScopeMode = "file" | "diff" | "chunk" | "auto";
 export type EffectiveRewriteScope = "file" | "diff" | "chunk";
@@ -82,6 +91,7 @@ const DEFAULTS: BypasserConfig = {
   contextLines: 60,
   maxChunkLines: 450,
   structuralCheck: true,
+  notifications: "auto",
 };
 
 /** Built-in paths that should never be rewritten. */
@@ -103,6 +113,8 @@ export const BUILT_IN_IGNORE = [
   // backups and tmp files from restageFile() — skip always
   "*.bak",
   "*.bypasser.tmp",
+  // structured audit log — a bypasser artifact, never source
+  ".bypasser.log.jsonl",
 ];
 
 export function loadConfig(cwd = process.cwd()): BypasserConfig {
@@ -113,9 +125,9 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     try {
       fileConfig = JSON.parse(readFileSync(configPath, "utf8"));
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const msg = err instanceof Error ? err.message : String(err);
       console.warn(
-        `[bypasser] ⚠ Could not parse .bypasser.json (${reason}) — using defaults.`
+        `[bypasser] ⚠ Could not parse .bypasser.json (${msg}) — using defaults.`
       );
     }
   }
@@ -139,28 +151,33 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
   const ignore = fileConfig.ignore ?? DEFAULTS.ignore;
   const thresholds = normalizeThresholdRules(fileConfig.thresholds);
 
-  const timeoutMs = positiveNumber(fileConfig.timeoutMs, DEFAULTS.timeoutMs);
-  const timeoutPer1kLinesMs = nonNegativeNumber(
+  const timeoutMs = positiveNum(fileConfig.timeoutMs, DEFAULTS.timeoutMs);
+  const timeoutPer1kLinesMs = nonNegativeNum(
     fileConfig.timeoutPer1kLinesMs,
     DEFAULTS.timeoutPer1kLinesMs
   );
-  const maxTimeoutMs = positiveNumber(fileConfig.maxTimeoutMs, DEFAULTS.maxTimeoutMs);
-  const maxFileLines = nonNegativeNumber(fileConfig.maxFileLines, DEFAULTS.maxFileLines);
-  const rewriteConcurrency = positiveNumber(
+  const maxTimeoutMs = positiveNum(fileConfig.maxTimeoutMs, DEFAULTS.maxTimeoutMs);
+  const maxFileLines = nonNegativeNum(fileConfig.maxFileLines, DEFAULTS.maxFileLines);
+  const rewriteConcurrency = positiveNum(
     fileConfig.rewriteConcurrency,
     DEFAULTS.rewriteConcurrency
   );
   const rewriteScope = parseRewriteScope(fileConfig.rewriteScope, DEFAULTS.rewriteScope);
-  const rewriteFullFileBelowLines = nonNegativeNumber(
+  const rewriteFullFileBelowLines = nonNegativeNum(
     fileConfig.rewriteFullFileBelowLines,
     DEFAULTS.rewriteFullFileBelowLines
   );
-  const contextLines = nonNegativeNumber(fileConfig.contextLines, DEFAULTS.contextLines);
-  const maxChunkLines = positiveNumber(fileConfig.maxChunkLines, DEFAULTS.maxChunkLines);
+  const contextLines = nonNegativeNum(fileConfig.contextLines, DEFAULTS.contextLines);
+  const maxChunkLines = positiveNum(fileConfig.maxChunkLines, DEFAULTS.maxChunkLines);
   const structuralCheck =
     typeof fileConfig.structuralCheck === "boolean"
       ? fileConfig.structuralCheck
       : DEFAULTS.structuralCheck;
+  const notifications = parseNotificationMode(
+    fileConfig.notifications,
+    process.env.BYPASSER_NOTIFICATIONS,
+    DEFAULTS.notifications
+  );
 
   return {
     baseURL,
@@ -181,7 +198,19 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     contextLines,
     maxChunkLines,
     structuralCheck,
+    notifications,
   };
+}
+
+/** `Notifications: off` in the file or `BYPASSER_NOTIFICATIONS=off` disables. */
+function parseNotificationMode(
+  fileValue: unknown,
+  envValue: string | undefined,
+  fallback: NotificationMode
+): NotificationMode {
+  const candidate = envValue ?? fileValue;
+  if (candidate === "off" || candidate === "auto") return candidate;
+  return fallback;
 }
 
 function parseRewriteScope(val: unknown, fallback: RewriteScopeMode): RewriteScopeMode {
@@ -214,12 +243,12 @@ function numOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function positiveNumber(value: unknown, fallback: number): number {
+function positiveNum(value: unknown, fallback: number): number {
   const n = numOr(value, fallback);
   return n > 0 ? n : fallback;
 }
 
-function nonNegativeNumber(value: unknown, fallback: number): number {
+function nonNegativeNum(value: unknown, fallback: number): number {
   const n = numOr(value, fallback);
   return n >= 0 ? n : fallback;
 }
@@ -237,7 +266,7 @@ export function scaledTimeoutMs(config: BypasserConfig, lineCount: number): numb
 
 function normalizeThresholdRules(rules: unknown): ThresholdRule[] {
   if (!Array.isArray(rules)) return [];
-  const out: ThresholdRule[] = [];
+  const res: ThresholdRule[] = [];
   for (const rule of rules) {
     if (
       rule &&
@@ -245,13 +274,13 @@ function normalizeThresholdRules(rules: unknown): ThresholdRule[] {
       typeof (rule as ThresholdRule).pattern === "string" &&
       typeof (rule as ThresholdRule).value === "number"
     ) {
-      out.push({
+      res.push({
         pattern: (rule as ThresholdRule).pattern,
         value: (rule as ThresholdRule).value,
       });
     }
   }
-  return out;
+  return res;
 }
 
 /**

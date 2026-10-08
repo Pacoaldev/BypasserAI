@@ -1,0 +1,76 @@
+name: bypasser-ai strict audit
+description: >-
+  Run bypasser-ai in strict mode against a project. Fails the job when any
+  staged/changed file is detected as AI-shaped and the pipeline could not
+  humanize it. Detection runs locally (deterministic, no API) for every file;
+  the API is only called for files above the threshold.
+
+inputs:
+  working-directory:
+    description: Directory of the project to audit (where .bypasser.json lives).
+    required: false
+    default: "."
+  base-url:
+    description: OpenAI-compatible base URL for rewrites.
+    required: false
+    default: ""
+  model:
+    description: Model name for rewrites.
+    required: false
+    default: ""
+  api-key:
+    description: >-
+      API key for the rewrite provider. Pass it via a secret
+      (e.g. ${{ secrets.BYPASSER_API_KEY }}).
+    required: true
+  strict:
+    description: >-
+      When "true" (default) the job fails if any AI-shaped file is left
+      un-humanized. When "false" the audit only reports.
+    required: false
+    default: "true"
+  bypasser-version:
+    description: Version of bypasser-ai to install (defaults to latest).
+    required: false
+    default: "latest"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Install bypasser-ai
+      shell: bash
+      run: npm install -g "bypasser-ai@${{ inputs.bypasser-version }}"
+
+    - name: Stage changes for the audit
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # The audit scans the index. In CI the checkout is a single commit, so
+        # stage everything first; `detect --all` is the alternative but the
+        # rewrite path needs the index to restage into.
+        git add -A
+
+    - name: Run strict audit
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BYPASSER_API_KEY: ${{ inputs.api-key }}
+        BYPASSER_BASE_URL: ${{ inputs.base-url }}
+        BYPASSER_MODEL: ${{ inputs.model }}
+      run: |
+        if [ "${{ inputs.strict }}" = "true" ]; then
+          bypasser audit --strict --verbose
+        else
+          bypasser audit --verbose
+        fi
+
+    - name: Detect-only summary (always, for visibility)
+      if: always()
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: bypasser detect --all --verbose || true

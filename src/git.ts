@@ -83,6 +83,23 @@ function synthesizeAddedDiff(filePath: string, content: string): string {
   return `--- /dev/null\n+++ b/${filePath}\n${body}`;
 }
 
+/**
+ * Every path git tracks (plus untracked-but-not-ignored files), repo-relative
+ * with forward slashes. Used to prune `.bypasser.state.json`: any cached entry
+ * whose path is not in this set refers to a file that was deleted or renamed.
+ *
+ * Returns `null` when git cannot be queried (not a repo, git missing) so callers
+ * skip pruning rather than wiping the whole cache.
+ */
+export function getTrackedFiles(cwd: string): string[] | null {
+  const tracked = gitOrNull(["ls-files"], cwd);
+  if (tracked === null) return null;
+  const untracked = gitOrNull(["ls-files", "--others", "--exclude-standard"], cwd) ?? "";
+  return [...tracked.split("\n"), ...untracked.split("\n")]
+    .map((f) => f.trim())
+    .filter((f) => f.length > 0);
+}
+
 export function getStagedFiles(
   cwd: string,
   config: BypasserConfig

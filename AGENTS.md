@@ -17,9 +17,10 @@ Apply `docs/SKILL.en.md` or `docs/SKILL.es.md` automatically whenever generating
 ## Architecture overview
 
 ```
-src/cli.ts               → command router (init / install / uninstall / detect / rewrite / audit)
-src/config.ts            → loads .bypasser.json and env vars (+ per-glob thresholds, scope, timeouts)
+src/cli.ts               → command router (init / install / uninstall / detect / rewrite / audit / stats)
+src/config.ts            → loads .bypasser.json and env vars (+ per-glob thresholds, scope, timeouts, notifications)
 src/detector.ts          → deterministic AI-pattern scorer (no API, six signal families). Language-agnostic via per-language profiles (JS, TS, Python, Go, Rust, Java, C#, C/C++, Ruby, PHP, unknown).
+src/mask.ts              → masks strings + comments into `code` / `comments` / `documented` views so signals never read string text as code (or vice-versa). Language-aware: JS/TS regex literals, Python prefixes/triple-quotes, Rust raw strings.
 src/rewriter.ts          → calls OpenAI-compatible API using docs/SKILL.en.md (or SKILL.es.md) as system prompt; full-file / diff-hunk / chunk strategies + response sanitizer
 src/rewrite-constants.ts → shared truncation/compression ratios (used by rewriter + restageFile)
 src/rewrite-validate.ts  → post-rewrite validators: looksIndentBroken, looksStructurallyBroken
@@ -28,16 +29,20 @@ src/syntax-guard.ts      → best-effort parse check (Python via interpreter, JS
 src/diff-hunks.ts        → parse/merge unified-diff hunk ranges, slice/splice, addedLineFraction
 src/chunk-split.ts       → splits a file into chunks at top-level declaration boundaries (per language)
 src/concurrency.ts       → mapPool: bounded-concurrency async pool, order-preserving
-src/git.ts               → one `git diff --cached` per audit (`splitCachedDiffByPath`), staged blob via `git show :path`, restage + `getWorkingTreeFiles()` for `detect --all`
+src/git.ts               → one `git diff --cached` per audit (`splitCachedDiffByPath`), staged blob via `git show :path`, restage + `getWorkingTreeFiles()` for `detect --all`, `getTrackedFiles()` for state pruning
 src/installer.ts         → writes/removes the pre-commit hook; `HOOK_INSTALL_EXCLUDED_REPO_NAMES` (opt-out list, `BYPASSER_HOOK_EXCLUDED_REPOS`)
-src/audit.ts             → full pipeline: detect → rewrite → restage → log → notify
-src/logger.ts            → appends .bypasser.log + persists rewrite hashes and detection cache in .bypasser.state.json
-src/notifier.ts          → Windows toast notifications (BurntToast → WinRT → balloon, detached)
+src/audit.ts             → full pipeline: detect → rewrite → restage → log → notify; `selectUnresolvedFiles()` powers `--strict`
+src/logger.ts            → appends .bypasser.log + structured .bypasser.log.jsonl; persists rewrite hashes and detection cache in .bypasser.state.json (batched + pruned)
+src/stats.ts             → aggregates the structured log for `bypasser stats`
+src/secrets.ts           → detects an inline apiKey at risk of being committed
+src/notifier.ts          → cross-platform notify (Windows toast + macOS/Linux shell), opt-in via `notifications`
 src/index.ts             → public library exports
 docs/SKILL.en.md / SKILL.es.md → humanizer prompt loaded by src/rewriter.ts (see docs/SKILL.md)
 scripts/canonical-bypasser.json → full default knobs for bulk `.bypasser.json` sync (skip excluded repos)
+scripts/bench-detector.ts → detector benchmark + golden snapshot (test/corpus/corpus.json)
 scripts/test.js          → cross-platform test runner (resolves test files, requires Node >= 20.6 for tsx --import)
 test/                    → node:test suites (run via scripts/test.js)
+test/corpus/             → annotated AI/human samples + detector-snapshot.json golden scores
 ```
 
 `src/index.ts` exports the public library surface (detector, rewriter, audit, config, git, install helpers including `isHookInstallExcluded`).
@@ -48,6 +53,7 @@ test/                    → node:test suites (run via scripts/test.js)
 npm run build      # tsc → dist/
 npm run typecheck  # tsc over src + test (no emit)
 npm test           # node scripts/test.js  → node --import tsx --test on resolved test files
+npm run bench      # detector confusion matrix + precision/recall/F1 over test/corpus
 npm run dev        # tsc --watch
 npm run lint       # eslint (flat config)
 npm run format     # prettier
@@ -110,6 +116,12 @@ bypasser audit --dry-run
 
 # What the pre-commit hook runs (compact summary; use BYPASSER_VERBOSE=1 for detail)
 bypasser audit --pre-commit
+
+# Strict gate for CI: exit non-zero if an AI-shaped file was not humanized
+bypasser audit --strict
+
+# Aggregate the structured audit log (.bypasser.log.jsonl)
+bypasser stats
 ```
 
 The installed hook invokes `audit --pre-commit` **without** `--verbose`. Audit failures and safety rejections **never block** the commit (`process.exit(0)`); check `.bypasser.log` and the hook summary line for `rejected` / API errors.
@@ -197,6 +209,8 @@ The detector must recognise idiomatic AI code in **every** language, not just Ja
 Rules for tuning `test`/`isApplicable`:
 
 - Write predicates against **idiomatic real-world code**, not toy snippets. `test/detector.test.ts` locks this with fixtures shaped like real repo files (`REAL_IDIOMATIC_AI`, `REALISTIC_AI_TS`, `REALISTIC_AI_PYTHON`, `HUMAN_DOCUMENTED_PHP`).
+- **Never match against raw source text — always against a masked view** (`src/mask.ts`). `detectAI` scores `ctx.code` (strings + comments blanked) for structural/naming signals, `ctx.masked.comments` for the comment-narration signal, and `ctx.masked.documented` for the docblock signals. Matching raw text is what let `const s = "// Validate"` count as a comment and `url.match(/function/)` count as a function. New signals must declare which view they read. The masker is language-aware (JS/TS regex literals via the division heuristic, Python `f"…"`/triple-quoted prefixes, Rust `r#"…"#`); extend it there, never inline a second scanner.
+- Keep the **benchmark green**: `test/corpus/corpus.json` + `test/corpus/detector-snapshot.json` are the objective measure of detector quality. A change that drops precision/recall/F1 below the floors in `test/bench-detector.test.ts`, or drifts any sample score by >0.02, is a regression until intentionally re-recorded (`BYPASSER_UPDATE_SNAPSHOT=1 npm test`). Do not lower the floors to make a regression pass.
 - Keep the **human counter-examples below threshold**: `HUMAN_DOCUMENTED_PHP` (a Laravel model with substantive docblocks) and the hand-written terse-code fixtures must stay under 0.65. A well-documented human codebase is *not* AI slop.
 - Docblocks are only an AI tell when they are **terse** (≤2 content lines, no `@param`/`Args:` annotations). Informative multi-line docblocks — the norm in Laravel, JSDoc-heavy TS, and NumPy-docstring Python — must not be flagged. See `terseDocBlockRatio`.
 - Do not count a class-based file's **primary class** as a "payload type" (`countTypeDeclarations` subtracts the main class); otherwise every short human class looks like an AI payload shape.

@@ -52,6 +52,10 @@ It is **language-agnostic** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, and m
 | **Parallel rewrites** | Configurable concurrency across staged files (`rewriteConcurrency`). |
 | **Windows toasts** | Optional native notifications after each commit (BurntToast → WinRT). |
 | **Any OpenAI-compatible API** | OpenAI, Groq, OpenRouter, Ollama, LM Studio, local proxies, etc. |
+| **Measured detector** | Annotated corpus + benchmark (`npm run bench`) reports precision/recall/F1 and locks scores with a golden snapshot. |
+| **String/comment masking** | Signals run on masked views, so a `//` in a string or a `function` inside a regex literal never inflates the score. |
+| **CI gate** | `bypasser audit --strict` fails the job when an AI-shaped file could not be humanized; reusable GitHub Action included. |
+| **Audit telemetry** | `bypasser stats` aggregates a structured `.bypasser.log.jsonl` — success rate by provider/model, rejection reasons, repeat offenders. |
 | **Agent-friendly** | [`AGENTS.md`](AGENTS.md) documents architecture and invariants for AI coding tools. |
 
 ---
@@ -233,6 +237,8 @@ bypasser audit --verbose
 | `bypasser audit` | Detect + rewrite + restage staged files |
 | `bypasser audit --dry-run` | Detect only, no API |
 | `bypasser audit --verbose` | Audit with signal details |
+| `bypasser audit --strict` | Exit non-zero if any AI-shaped file was **not** humanized (CI gate) |
+| `bypasser stats` | Summarize the structured audit log (`.bypasser.log.jsonl`) |
 
 ---
 
@@ -257,6 +263,7 @@ bypasser audit --verbose
 | `contextLines` | `60` | Context around diff hunks |
 | `maxChunkLines` | `450` | Max lines per chunk |
 | `structuralCheck` | `true` | Reject rewrites that drop too many top-level declarations |
+| `notifications` | `auto` | `auto` (toast on Windows, shell notify on macOS/Linux) · `off` (never) |
 
 **Environment variables** (override file config; preferred for secrets):
 
@@ -349,12 +356,39 @@ Failed rewrites **do not block** the commit; check `.bypasser.log` and hook outp
 
 ---
 
+## CI gate & detector calibration
+
+**Detector quality is measured, not assumed.** `test/corpus/corpus.json` holds
+annotated AI/human samples across languages; `npm run bench` runs the detector
+over them and reports a confusion matrix, precision/recall/F1, and the threshold
+that maximises F1. `test/bench-detector.test.ts` asserts a quality floor and
+locks every sample's score against a golden snapshot — a weight tweak that moves
+a score by more than 0.02 fails CI until it is consciously re-recorded
+(`BYPASSER_UPDATE_SNAPSHOT=1 npm test`).
+
+**Strict gate for CI** (not the hook — the hook never blocks a commit):
+
+```bash
+bypasser audit --strict   # exits 1 if an AI-shaped file was not humanized
+```
+
+A ready-made composite Action wraps this for any repo:
+
+```yaml
+- uses: Pacoaldev/BypasserAI/.github/actions/bypasser-strict@main
+  with:
+    api-key: ${{ secrets.BYPASSER_API_KEY }}
+```
+
+---
+
 ## Development
 
 ```bash
 npm install
 npm run build      # required after src/ changes
 npm test           # node:test via scripts/test.js (Node >= 20.6 for tsx)
+npm run bench      # detector precision/recall/F1 over the annotated corpus
 npm run typecheck
 npm run lint
 npm run format

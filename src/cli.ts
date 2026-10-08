@@ -4,6 +4,7 @@ import { runAudit } from "./audit.js";
 import { detectAI, countChangedLines } from "./detector.js";
 import { getStagedFiles, getWorkingTreeFiles, matchGlob } from "./git.js";
 import { loadConfig, resolveThreshold } from "./config.js";
+import { inspectConfigSecrets, redactKey, extractInlineApiKey } from "./secrets.js";
 import { writeFileSync, readFileSync, existsSync, appendFileSync } from "fs";
 import { resolve } from "path";
 
@@ -18,6 +19,7 @@ async function main() {
     case "install":
       install(cwd);
       ensureGitignoreEntries(cwd);
+      warnAboutInlineApiKey(cwd);
       break;
 
     case "uninstall":
@@ -103,6 +105,11 @@ async function main() {
         flags.has("-v") ||
         process.env.BYPASSER_VERBOSE === "1";
       const preCommit = flags.has("--pre-commit");
+      const strict = flags.has("--strict");
+
+      // Warn (once, non-fatal) if the config carries an inline key that could
+      // be committed. See secrets.ts.
+      warnAboutInlineApiKey(cwd);
 
       try {
         const result = await runAudit({ cwd, dryRun, verbose });
@@ -151,11 +158,34 @@ async function main() {
           );
         }
 
+        // `--strict` turns the audit into a real gate (for CI, not the hook):
+        // any file that scored at/above its threshold but was NOT humanized
+        // makes the command exit non-zero. Without it the command always exits
+        // 0 so a commit is never blocked by tool/API errors.
+        if (strict && result.unresolvedFiles.length > 0) {
+          console.error(
+            `\n  ✖ strict: ${result.unresolvedFiles.length} file(s) are AI-shaped and were not humanized:`
+          );
+          for (const f of result.unresolvedFiles) {
+            const reason = f.skippedReason ?? "not rewritten";
+            console.error(
+              `      ${f.path} — ${(f.score * 100).toFixed(0)}% (threshold ${(f.threshold * 100).toFixed(0)}%): ${reason}`
+            );
+          }
+          console.error(
+            `     Fix the rewrite (model/endpoint) or lower these files' score, then re-run.`
+          );
+          process.exit(1);
+        }
+
         process.exit(0);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`bypasser-ai error: ${msg}`);
-        // never block commit on tool errors
+        // In strict mode a hard failure (e.g. missing API key, bad endpoint) is
+        // itself a gate failure: the audit could not prove the tree is clean.
+        if (strict) process.exit(1);
+        // never block commit on tool errors in normal mode
         process.exit(0);
       }
       break;
@@ -187,6 +217,7 @@ async function main() {
         contextLines: 60,
         maxChunkLines: 450,
         structuralCheck: true,
+        notifications: "auto",
       };
       writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + "\n", "utf8");
       console.log(
@@ -194,6 +225,15 @@ async function main() {
       );
       ensureGitignoreEntries(cwd);
       console.log('Run "bypasser install" to install the pre-commit hook.');
+      warnAboutInlineApiKey(cwd);
+      break;
+    }
+
+    case "stats": {
+      const { readAuditEvents } = await import("./logger.js");
+      const { computeStats, renderStats } = await import("./stats.js");
+      const events = readAuditEvents(cwd);
+      console.log(renderStats(computeStats(events)));
       break;
     }
 
@@ -219,6 +259,9 @@ COMMANDS
   audit                 Detect + rewrite staged files above threshold
   audit --dry-run       Detect only, do not call the API or restage
   audit --verbose       Show per-file signal details
+  audit --strict        Exit non-zero if any AI-shaped file was not humanized
+                        (a real gate for CI — not used by the pre-commit hook)
+  stats                 Summarize the structured audit log (.bypasser.log.jsonl)
 
 ENVIRONMENT VARIABLES
   BYPASSER_API_KEY      API key (overrides .bypasser.json)
@@ -239,6 +282,7 @@ DOCS
 function ensureGitignoreEntries(cwd: string): void {
   const wanted = [
     ".bypasser.log",
+    ".bypasser.log.jsonl",
     ".bypasser.state.json",
     "*.bypasser.tmp",
     "*.bak",
@@ -276,6 +320,33 @@ function ensureGitignoreEntries(cwd: string): void {
 function scoreBar(score: number): string {
   const filled = Math.round(score * 10);
   return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]";
+}
+
+/**
+ * Warn when `.bypasser.json` carries an inline `apiKey` that is at risk of being
+ * committed. Non-fatal: the env var (`BYPASSER_API_KEY`) always overrides the
+ * file, so the user can export it and blank the field. Only warns when there is
+ * something to act on: an inline key whose config is NOT git-ignored.
+ */
+function warnAboutInlineApiKey(cwd: string): void {
+  const configPath = resolve(cwd, ".bypasser.json");
+  const gitignorePath = resolve(cwd, ".gitignore");
+  const configJson = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
+  const gitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : null;
+
+  const findings = inspectConfigSecrets(configJson, gitignore);
+  if (!findings.atRisk) return;
+
+  const key = configJson ? extractInlineApiKey(configJson) : null;
+  console.warn(
+    `\n  ⚠ [bypasser] .bypasser.json contains an inline apiKey (${key ? redactKey(key) : "set"}) ` +
+      `and is NOT git-ignored — it can be committed and leak.`
+  );
+  console.warn(
+    `     Recommended: set the environment variable instead and blank the field:\n` +
+      `       export BYPASSER_API_KEY=...        # env wins over the file\n` +
+      `     Or add ".bypasser.json" to .gitignore if it is machine-local.`
+  );
 }
 
 main().catch((err) => {

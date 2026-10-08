@@ -19,6 +19,9 @@
  * A signal never hard-codes a single language's syntax.
  */
 
+import { maskSource } from "./mask.js";
+import type { MaskedSource } from "./mask.js";
+
 export interface DetectorResult {
   score: number;
   signals: Signal[];
@@ -465,24 +468,30 @@ function codeLineCount(code: string): number {
   return code.split("\n").filter((l) => l.trim().length > 0).length;
 }
 
-/** Count lines whose only content is a line or block comment. */
-function countCommentLines(code: string, p: LanguageProfile): number {
+/**
+ * Count lines whose only content is a line or block comment.
+ *
+ * Operates on the **comments** view (`masked.comments`), where the text inside
+ * comments is preserved and everything else is blanked. This is what stops a
+ * `#` or `//` *inside a string* from being counted as a comment line.
+ */
+function countCommentLines(commentsView: string): number {
   let n = 0;
-  for (const line of code.split("\n")) {
+  for (const line of commentsView.split("\n")) {
     const t = line.trim();
-    if (p.lineComment.some((c) => t.startsWith(c))) n++;
-    else if (t.startsWith("/*") || t.startsWith("*") || t.startsWith("*/")) n++;
-    // Python docstring delimiters.
-    else if (t === '"""' || t === "'''" || t.startsWith('"""') || t.startsWith("'''")) n++;
+    if (t.length === 0) continue;
+    // Every non-blank character in a comment-view line came from comment text,
+    // so any non-empty line is a comment line.
+    n++;
   }
   return n;
 }
 
-/** Fraction of non-blank lines that are comments. */
-function commentRatio(code: string, p: LanguageProfile): number {
-  const total = codeLineCount(code);
+/** Fraction of non-blank lines that are comments (code view + comment view). */
+function commentRatio(codeView: string, commentsView: string): number {
+  const total = codeLineCount(codeView) + countCommentLines(commentsView);
   if (total === 0) return 0;
-  return countCommentLines(code, p) / total;
+  return countCommentLines(commentsView) / total;
 }
 
 /**
@@ -495,8 +504,12 @@ function commentRatio(code: string, p: LanguageProfile): number {
  * This is what separates a documented human codebase (Laravel, where every
  * method legitimately carries a docblock) from AI slop (a terse docblock on
  * *every* method).
+ *
+ * Operates on the **documented view** (`masked.documented`): docblock
+ * delimiters survive while string literals that merely *look* like docblocks
+ * are blanked.
  */
-function terseDocBlockRatio(code: string, p: LanguageProfile): number {
+function terseDocBlockRatio(documented: string, p: LanguageProfile): number {
   const re = new RegExp(
     p.docBlock.source,
     p.docBlock.flags.includes("g") ? p.docBlock.flags : p.docBlock.flags + "g"
@@ -504,7 +517,7 @@ function terseDocBlockRatio(code: string, p: LanguageProfile): number {
   let total = 0;
   let terse = 0;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(code)) !== null) {
+  while ((m = re.exec(documented)) !== null) {
     total++;
     const block = m[0];
     // A block carrying structured annotations (@param/@returns/@throws, Python
@@ -564,8 +577,12 @@ function countTypeDeclarations(code: string, p: LanguageProfile): number {
  * line of code plainly does. We look for the *pattern* — an
  * imperative/narrative sentence-starting comment — which is the hallmark of
  * AI narration regardless of comment syntax.
+ *
+ * Operates on the **comments view** (`masked.comments`): only real comment text
+ * is present, so a `//` inside a string can never be read as a narrating
+ * comment.
  */
-function hasNarratingComments(code: string, p: LanguageProfile): boolean {
+function hasNarratingComments(commentsView: string, p: LanguageProfile): boolean {
   // Two shapes of "AI narration":
   //  1. A short imperative comment that restates the next statement:
   //     `// Validate the input`, `// Create the client`.
@@ -576,22 +593,21 @@ function hasNarratingComments(code: string, p: LanguageProfile): boolean {
   // longer, contain internal punctuation, and must NOT be counted — flagging
   // them was a false positive on well-commented human code.
   const SHORT_IMPERATIVE =
-    /^\s*(?:\/\/|#|\*)\s*(?:Validate|Create|Check|Handle|Get|Set|Fetch|Build|Make|Initialize|Ensure|Return|Iterate|Loop|Parse|Read|Write|Load|Save|Compute|Calculate|Convert|Transform|Process|Add|Remove|Update|Skip|Score|Fire|Wrap|Mark|Record|Apply|Install|Send|Run|Execute|Open|Close|Start|Stop|Filter|Map|Sort|Group|Merge|Split|Join|Retry|Log|Throw|Reset|Clear|Render|Draw|Register|Unregister|Attach|Detach|Bind|Unbind)\b[^\n]*$/;
+    /^\s*(?:\/\/|#|\*)?\s*(?:Validate|Create|Check|Handle|Get|Set|Fetch|Build|Make|Initialize|Ensure|Return|Iterate|Loop|Parse|Read|Write|Load|Save|Compute|Calculate|Convert|Transform|Process|Add|Remove|Update|Skip|Score|Fire|Wrap|Mark|Record|Apply|Install|Send|Run|Execute|Open|Close|Start|Stop|Filter|Map|Sort|Group|Merge|Split|Join|Retry|Log|Throw|Reset|Clear|Render|Draw|Register|Unregister|Attach|Detach|Bind|Unbind)\b[^\n]*$/;
   const MACRO_NARRATOR =
-    /^\s*(?:\/\/|#|\*)\s*(?:This (?:function|method|class|file|module|component|hook)\b|The (?:function|code|following)\b)/;
+    /^\s*(?:\/\/|#|\*)?\s*(?:This (?:function|method|class|file|module|component|hook)\b|The (?:function|code|following)\b)/;
 
   let narrated = 0;
-  for (const line of code.split("\n")) {
-    const isComment = /^\s*(?:\/\/|#|\*)/.test(line);
-    if (!isComment) continue;
-    const body = line.replace(/^\s*(?:\/\/|#|\*)\s?/, "").trim();
+  for (const line of commentsView.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
     if (MACRO_NARRATOR.test(line)) {
       narrated++;
       continue;
     }
     // Short imperative restatement: no internal sentence punctuation, and
     // genuinely short. A rationale comment runs long and/or has a period.
-    if (SHORT_IMPERATIVE.test(line) && body.length <= 60 && !/[.;:]/.test(body)) {
+    if (SHORT_IMPERATIVE.test(line) && trimmed.length <= 60 && !/[.;:]/.test(trimmed)) {
       narrated++;
     }
   }
@@ -610,6 +626,13 @@ type SignalContext = {
   p: LanguageProfile;
   /** Path of the file being scored, when known. */
   filePath?: string;
+  /**
+   * Masked views of the source (see `mask.ts`). `code` is already strings-and-
+   * comments-blanked and is what `ctx.code` points at; `comments` and
+   * `documented` are the comment-text and docblock-preserving views that the
+   * comment-family signals use.
+   */
+  masked: MaskedSource;
 };
 
 type SignalDef = Omit<Signal, "fired"> & {
@@ -747,23 +770,25 @@ const SIGNALS: SignalDef[] = [
     family: "comments",
     description: "Comments narrate what the code plainly does",
     weight: 0.9,
-    isApplicable: ({ code, p }) =>
-      p.lineComment.some((c) => code.includes(c)) || /\/\*|"""|'''/.test(code),
-    test: ({ code, p }) => hasNarratingComments(code, p),
+    isApplicable: ({ code, masked }) =>
+      masked.comments.trim().length > 0 ||
+      code.includes("/*") ||
+      /"""|'''/.test(code),
+    test: ({ masked, p }) => hasNarratingComments(masked.comments, p),
   },
   {
     family: "comments",
     description: "Terse documentation block on (nearly) every function",
     weight: 0.75,
     isApplicable: ({ code, p }) => countFunctions(code, p) >= 2,
-    test: ({ code, p }) => {
+    test: ({ code, p, masked }) => {
       const functions = countFunctions(code, p);
-      const docBlocks = countDocBlocks(code, p);
+      const docBlocks = countDocBlocks(masked.documented, p);
       if (functions < 2 || docBlocks < Math.ceil(functions / 2)) return false;
       // ...AND the docblocks must be terse (the AI shape). A human codebase
       // like Laravel documents every method, but with substantive multi-line
       // blocks that explain *why*; that must not be flagged.
-      return terseDocBlockRatio(code, p) >= 0.6;
+      return terseDocBlockRatio(masked.documented, p) >= 0.6;
     },
   },
   {
@@ -771,14 +796,14 @@ const SIGNALS: SignalDef[] = [
     description: "High comment density (documentation on everything)",
     weight: 0.6,
     isApplicable: ({ code }) => codeLineCount(code) >= 20,
-    test: ({ code, p }) => {
-      if (commentRatio(code, p) < 0.2) return false;
+    test: ({ code, p, masked }) => {
+      if (commentRatio(code, masked.comments) < 0.2) return false;
       // Well-documented human code (Laravel/PHP, Java, C#) legitimately has a
       // high comment ratio. Only treat it as an AI tell when the documentation
       // is terse and restating — the same guard the docblock signal uses.
-      const docBlocks = countDocBlocks(code, p);
+      const docBlocks = countDocBlocks(masked.documented, p);
       if (docBlocks === 0) return true; // narration lines, not docblocks
-      return terseDocBlockRatio(code, p) >= 0.6;
+      return terseDocBlockRatio(masked.documented, p) >= 0.6;
     },
   },
 
@@ -939,7 +964,8 @@ const SCORE_REFERENCE_WEIGHT = 2.5;
 
 export function detectAI(code: string, filePath?: string): DetectorResult {
   const p = resolveLanguage(filePath, code);
-  const ctx: SignalContext = { code, p, filePath };
+  const masked = maskSource(code, p);
+  const ctx: SignalContext = { code: masked.code, p, filePath, masked };
 
   const signals: Signal[] = SIGNALS.map((s) => ({
     family: s.family,
