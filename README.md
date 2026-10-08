@@ -50,7 +50,7 @@ It is **language-agnostic** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, and m
 | **Smart rewrite scope** | Small files → full file; large files → diff hunks or declaration chunks (`rewriteScope: auto`). |
 | **Safety first** | Truncation, indent, structure, and syntax guards; atomic restage with `.bak` rollback — originals win on doubt. |
 | **Parallel rewrites** | Configurable concurrency across staged files (`rewriteConcurrency`). |
-| **Windows toasts** | Optional native notifications after each commit (BurntToast → WinRT). |
+| **Optional notifications** | Native toast on Windows, shell notify on macOS/Linux; disable with `notifications`. |
 | **Any OpenAI-compatible API** | OpenAI, Groq, OpenRouter, Ollama, LM Studio, local proxies, etc. |
 | **Measured detector** | Annotated corpus + benchmark (`npm run bench`) reports precision/recall/F1 and locks scores with a golden snapshot. |
 | **String/comment masking** | Signals run on masked views, so a `//` in a string or a `function` inside a regex literal never inflates the score. |
@@ -202,7 +202,7 @@ Details: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusio
 |---------|----------------|
 | **Hook stdout** | Compact per-file score + humanized / ok / skipped / failed |
 | **`.bypasser.log`** | Timestamped history with fired signals (great tab to leave open) |
-| **Windows toast** | Clean / Humanized / Rewrite failed (optional; Windows only) |
+| **Desktop notification** | Clean / Humanized / Rewrite failed (optional; `notifications: auto` by default) |
 
 Example log excerpt:
 
@@ -302,7 +302,7 @@ Full template for bulk sync across repos: [`scripts/canonical-bypasser.json`](sc
 
 ## Files always skipped
 
-Built-in ignores include lockfiles, `dist/**`, `build/**`, `.next/**`, minified assets, most `*.json` / `*.yaml` / `*.toml`, and bypasser artifacts (`*.bak`, `*.bypasser.tmp`). Extend with `ignore` in `.bypasser.json`.
+Built-in ignores include lockfiles, `dist/**`, `build/**`, `.next/**`, minified assets, most `*.json` / `*.yaml` / `*.toml`, and bypasser artifacts (`*.bak`, `*.bypasser.tmp`, `.bypasser.log.jsonl`). Extend with `ignore` in `.bypasser.json`.
 
 ---
 
@@ -311,6 +311,8 @@ Built-in ignores include lockfiles, `dist/**`, `build/**`, `.next/**`, minified 
 Six **signal families** (naming, structure, comments, error-handling, abstraction, uniformity) fire on language-aware profiles — not English-only heuristics. Fired weights combine through a saturating curve `1 - e^(-w/2.5)` so realistic AI clusters land around **70–85%** while typical human code stays **below ~50%** at the default threshold **0.65**.
 
 Informative docblocks (`@param`, multi-line rationale) are **not** penalized; only terse restating docblocks on nearly every function count as an AI tell.
+
+Before scoring, code and comments are split into **masked views** (`src/mask.ts`), so a `//` inside a string, a `function` inside a regex literal, or a URL containing `//` never count as code. Detector behaviour is pinned by an **annotated corpus + benchmark** (`npm run bench`) — see [CI gate & detector calibration](#ci-gate--detector-calibration).
 
 ---
 
@@ -405,7 +407,7 @@ Contributions welcome — open an [issue](https://github.com/Pacoaldev/BypasserA
 - Skips config, locks, and generated artifacts by convention
 - Never weakens security or correctness to “look human”
 - Heuristic detector — tune `threshold` / `thresholds` if needed
-- Toasts are Windows-oriented; hook and CLI work on macOS/Linux
+- Hook and CLI work on Windows/macOS/Linux; desktop notifications are optional (`notifications: off` disables them)
 
 ---
 

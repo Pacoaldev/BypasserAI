@@ -50,8 +50,12 @@ Es **agnóstico al lenguaje** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, etc
 | **Scope inteligente** | Archivos pequeños → archivo completo; grandes → hunks del diff o trozos por declaraciones (`rewriteScope: auto`). |
 | **Seguridad primero** | Guardas de truncado, indentación, estructura y sintaxis; restage atómico con rollback `.bak` — ante la duda gana el original. |
 | **Reescrituras en paralelo** | Concurrencia configurable entre archivos (`rewriteConcurrency`). |
-| **Toasts en Windows** | Notificaciones nativas tras cada commit (BurntToast → WinRT). |
+| **Notificaciones opcionales** | Aviso de escritorio tras cada commit (toast nativo en Windows; `notify-send`/`osascript` en Linux/macOS); desactivable con `notifications`. |
 | **Cualquier API OpenAI-compatible** | OpenAI, Groq, OpenRouter, Ollama, LM Studio, proxies locales, etc. |
+| **Detector medido** | Corpus anotado + benchmark (`npm run bench`) con precision/recall/F1 y snapshot dorado que fija las puntuaciones. |
+| **Máscara de strings/comentarios** | Las señales operan sobre vistas enmascaradas, así un `//` dentro de un string o un `function` dentro de un regex literal nunca infla el score. |
+| **Gate de CI** | `bypasser audit --strict` falla el job si un archivo con forma de IA no se pudo humanizar; incluye GitHub Action reutilizable. |
+| **Telemetría de auditoría** | `bypasser stats` agrega el log estructurado `.bypasser.log.jsonl`: tasa de éxito por proveedor/modelo, motivos de rechazo y reincidentes. |
 | **Listo para agentes** | [`AGENTS.md`](AGENTS.md) documenta arquitectura e invariantes para herramientas de IA. |
 
 ---
@@ -148,7 +152,7 @@ bypasser init
 
 - Crea `.bypasser.json` con valores por defecto razonables.
 - **No sobrescribe** una config existente (protege `apiKey` y ajustes manuales). Usa `bypasser init --force` para regenerar.
-- Añade a `.gitignore`: `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, `*.bak`.
+- Añade a `.gitignore`: `.bypasser.log`, `.bypasser.log.jsonl`, `.bypasser.state.json`, `*.bypasser.tmp`, `*.bak`.
 
 Ejemplo de config (las claves omitidas se rellenan en runtime con `loadConfig()`):
 
@@ -170,7 +174,8 @@ Ejemplo de config (las claves omitidas se rellenan en runtime con `loadConfig()`
   "rewriteFullFileBelowLines": 400,
   "contextLines": 60,
   "maxChunkLines": 450,
-  "structuralCheck": true
+  "structuralCheck": true,
+  "notifications": "auto"
 }
 ```
 
@@ -198,7 +203,7 @@ Detalle: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusio
 |-------|---------|
 | **Salida del hook** | Puntuación compacta por archivo + humanized / ok / skipped / failed |
 | **`.bypasser.log`** | Historial con marcas de tiempo y señales disparadas (ideal dejarlo abierto en una pestaña) |
-| **Toast Windows** | Clean / Humanized / Rewrite failed (opcional; solo Windows) |
+| **Notificación de escritorio** | Clean / Humanized / Rewrite failed (opcional; `notifications: auto` por defecto) |
 
 Ejemplo de log:
 
@@ -233,6 +238,8 @@ bypasser audit --verbose
 | `bypasser audit` | Detect + rewrite + restage en staging |
 | `bypasser audit --dry-run` | Solo detección, sin API |
 | `bypasser audit --verbose` | Auditoría con detalle de señales |
+| `bypasser audit --strict` | Sale con código ≠ 0 si un archivo con forma de IA **no** se humanizó (gate de CI) |
+| `bypasser stats` | Resume el log estructurado de auditoría (`.bypasser.log.jsonl`) |
 
 ---
 
@@ -257,6 +264,7 @@ bypasser audit --verbose
 | `contextLines` | `60` | Contexto alrededor de hunks |
 | `maxChunkLines` | `450` | Máximo de líneas por chunk |
 | `structuralCheck` | `true` | Rechaza reescrituras que pierden demasiadas declaraciones top-level |
+| `notifications` | `auto` | `auto` (toast en Windows, notificación de shell en macOS/Linux) · `off` (nunca) |
 
 **Variables de entorno** (pisan el fichero; recomendadas para secretos):
 
@@ -269,6 +277,7 @@ bypasser audit --verbose
 | `BYPASSER_VERBOSE` | `1` → salida verbose en audit/hook |
 | `BYPASSER_HOOK_EXCLUDED_REPOS` | Nombres de carpeta de repo separados por comas para bloquear `install` |
 | `BYPASSER_SKILL_LOCALE` | `es` → prompt humanizer en español; por defecto inglés |
+| `BYPASSER_NOTIFICATIONS` | `off` → desactiva las notificaciones de escritorio |
 
 ### Elección de modelo (importante)
 
@@ -295,7 +304,7 @@ Plantilla completa para sincronizar muchos repos: [`scripts/canonical-bypasser.j
 
 ## Archivos que siempre se omiten
 
-Ignorados por defecto: lockfiles, `dist/**`, `build/**`, `.next/**`, minificados, la mayoría de `*.json` / `*.yaml` / `*.toml`, y artefactos de bypasser (`*.bak`, `*.bypasser.tmp`). Amplía con `ignore` en `.bypasser.json`.
+Ignorados por defecto: lockfiles, `dist/**`, `build/**`, `.next/**`, minificados, la mayoría de `*.json` / `*.yaml` / `*.toml`, y artefactos de bypasser (`*.bak`, `*.bypasser.tmp`, `.bypasser.log.jsonl`). Amplía con `ignore` en `.bypasser.json`.
 
 ---
 
@@ -304,6 +313,8 @@ Ignorados por defecto: lockfiles, `dist/**`, `build/**`, `.next/**`, minificados
 Seis **familias de señales** (naming, structure, comments, error-handling, abstraction, uniformity) sobre perfiles por lenguaje — no heurísticas solo en inglés. Los pesos disparados se combinan con la curva saturante `1 - e^(-w/2.5)`: clusters típicos de IA ~**70–85 %**, código humano habitual **por debajo de ~50 %** con umbral **0.65**.
 
 Docblocks informativos (`@param`, varias líneas de contexto) **no** penalizan; solo docblocks telegráficos que repiten lo obvio en casi cada función.
+
+Antes de puntuar, el código y los comentarios se separan en **vistas enmascaradas** (`src/mask.ts`), así que ni un `//` dentro de un string, ni un `function` dentro de un regex literal, ni una URL con `//` cuentan como código. El comportamiento del detector está fijado por un **corpus anotado + benchmark** (`npm run bench`) — ver [Gate de CI y calibración](#gate-de-ci-y-calibración-del-detector).
 
 ---
 
@@ -314,6 +325,7 @@ src/
   cli.ts              Enrutador de comandos
   config.ts           .bypasser.json + env + resolución de scope
   detector.ts         Scorer determinista (perfiles por lenguaje)
+  mask.ts             Vistas enmascaradas code/comments/documented (strings y comentarios fuera del scoring)
   rewriter.ts         Cliente API, prompt humanizer, sanitizers
   rewrite-validate.ts Heurísticas de indent / estructura
   rewrite-constants.ts Umbrales de ratios compartidos
@@ -321,16 +333,23 @@ src/
   diff-hunks.ts       Parseo unified diff, slice, splice
   chunk-split.ts      Troceado por declaraciones top-level
   concurrency.ts      Pool paralelo acotado
-  git.ts              Contenido staged, diff cached en batch, restage
+  git.ts              Contenido staged, diff cached en batch, restage, archivos rastreados
   installer.ts        Install/remove hook + repos excluidos
-  audit.ts            detect → rewrite → restage → log → notify
-  logger.ts           .bypasser.log + caché .bypasser.state.json
-  notifier.ts         Pipeline de toasts Windows
+  audit.ts            detect → rewrite → restage → log → notify; selectUnresolvedFiles() para --strict
+  logger.ts           .bypasser.log + .bypasser.log.jsonl estructurado + caché .bypasser.state.json (batch + poda)
+  stats.ts            Agrega el log estructurado para `bypasser stats`
+  secrets.ts          Detecta un apiKey inline en riesgo de commitearse
+  notifier.ts         Notificaciones multiplataforma (toast Windows + shell macOS/Linux)
   index.ts            Exports de librería pública
 docs/
   SKILL.en.md         Prompt humanizer (default en runtime)
   SKILL.es.md         Prompt humanizer (español)
   SKILL.md            Índice bilingüe + locale
+scripts/
+  bench-detector.ts   Benchmark del detector + snapshot dorado (test/corpus/corpus.json)
+  test.js             Runner de tests multiplataforma
+test/
+  corpus/             Muestras AI/human anotadas + detector-snapshot.json
 ```
 
 ---
@@ -349,12 +368,39 @@ Las reescrituras fallidas **no bloquean** el commit; revisa `.bypasser.log` y la
 
 ---
 
+## Gate de CI y calibración del detector
+
+**La calidad del detector se mide, no se asume.** `test/corpus/corpus.json`
+guarda muestras AI/human anotadas en varios lenguajes; `npm run bench` corre el
+detector sobre ellas y reporta matriz de confusión, precision/recall/F1 y el
+umbral que maximiza F1. `test/bench-detector.test.ts` fija un piso de calidad y
+bloquea la puntuación de cada muestra contra un snapshot dorado — un ajuste de
+pesos que mueva un score más de 0.02 falla el CI hasta re-registrarlo a
+propósito (`BYPASSER_UPDATE_SNAPSHOT=1 npm test`).
+
+**Gate estricto para CI** (no el hook — el hook nunca bloquea un commit):
+
+```bash
+bypasser audit --strict   # sale con 1 si un archivo con forma de IA no se humanizó
+```
+
+Una Action compuesta lista para cualquier repo envuelve esto:
+
+```yaml
+- uses: Pacoaldev/BypasserAI/.github/actions/bypasser-strict@main
+  with:
+    api-key: ${{ secrets.BYPASSER_API_KEY }}
+```
+
+---
+
 ## Desarrollo
 
 ```bash
 npm install
 npm run build      # obligatorio tras cambios en src/
 npm test           # node:test vía scripts/test.js (Node >= 20.6 para tsx)
+npm run bench      # precision/recall/F1 del detector sobre el corpus anotado
 npm run typecheck
 npm run lint
 npm run format
@@ -371,7 +417,7 @@ Contribuciones bienvenidas — abre un [issue](https://github.com/Pacoaldev/Bypa
 - Omite configs, locks y artefactos generados por convención
 - No debilita seguridad ni corrección para “parecer humano”
 - Detector heurístico — ajusta `threshold` / `thresholds` si hace falta
-- Toasts orientados a Windows; hook y CLI funcionan en macOS/Linux
+- Hook y CLI funcionan en Windows/macOS/Linux; las notificaciones de escritorio son opcionales (`notifications: off` las desactiva)
 
 ---
 
