@@ -64,9 +64,7 @@ It is **language-agnostic** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, and m
 ## Quick start
 
 ```bash
-git clone https://github.com/Pacoaldev/BypasserAI.git
-cd BypasserAI
-npm install && npm run build && npm link
+npm install -g bypasser-ai
 ```
 
 In **your application repo** (not inside BypasserAI):
@@ -122,7 +120,14 @@ Detection always uses the **full staged file** so a tiny edit in a large AI file
 
 ## Installation
 
-### From source (recommended today)
+### From npm (recommended)
+
+```bash
+npm install -g bypasser-ai
+# or run without installing: npx bypasser-ai <command>
+```
+
+### From source
 
 ```bash
 git clone https://github.com/Pacoaldev/BypasserAI.git
@@ -133,13 +138,6 @@ npm link    # exposes the `bypasser` command globally
 ```
 
 > After changing `src/` in this repo, run **`npm run build`** again. The hook everywhere executes `dist/cli.js` from your linked copy — stale `dist/` = stale behavior.
-
-### From npm (when published)
-
-```bash
-npm install -g bypasser-ai
-# or: npx bypasser-ai <command>
-```
 
 ---
 

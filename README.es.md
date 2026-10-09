@@ -64,9 +64,7 @@ Es **agnóstico al lenguaje** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, etc
 ## Inicio rápido
 
 ```bash
-git clone https://github.com/Pacoaldev/BypasserAI.git
-cd BypasserAI
-npm install && npm run build && npm link
+npm install -g bypasser-ai
 ```
 
 En **tu repo de aplicación** (no dentro de BypasserAI):
@@ -122,7 +120,14 @@ La detección usa siempre el **archivo staged completo**, así un cambio mínimo
 
 ## Instalación
 
-### Desde el código fuente (recomendado hoy)
+### Desde npm (recomendado)
+
+```bash
+npm install -g bypasser-ai
+# o sin instalar: npx bypasser-ai <comando>
+```
+
+### Desde el código fuente
 
 ```bash
 git clone https://github.com/Pacoaldev/BypasserAI.git
@@ -133,13 +138,6 @@ npm link    # deja el comando `bypasser` disponible globalmente
 ```
 
 > Tras cambiar `src/` en este repo, ejecuta otra vez **`npm run build`**. El hook en todos los proyectos usa `dist/cli.js` de tu copia enlazada — un `dist/` viejo = comportamiento viejo.
-
-### Desde npm (cuando se publique)
-
-```bash
-npm install -g bypasser-ai
-# o: npx bypasser-ai <comando>
-```
 
 ---
 
