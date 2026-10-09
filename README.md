@@ -153,7 +153,7 @@ bypasser init
 
 - Creates `.bypasser.json` with sensible defaults.
 - **Does not overwrite** an existing config (protects `apiKey` and custom settings). Use `bypasser init --force` to regenerate.
-- Appends `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
+- Appends `.bypasser.log`, `.bypasser.log.jsonl`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
 
 Example config (omitted keys fall back to runtime defaults in `loadConfig()`):
 
@@ -175,7 +175,8 @@ Example config (omitted keys fall back to runtime defaults in `loadConfig()`):
   "rewriteFullFileBelowLines": 400,
   "contextLines": 60,
   "maxChunkLines": 450,
-  "structuralCheck": true
+  "structuralCheck": true,
+  "notifications": "auto"
 }
 ```
 
@@ -231,6 +232,10 @@ BypasserAI data live in the right sidebar — last run (files, scores, per-famil
 signals, delta vs previous run), project history (success rate, trend sparkline,
 hotspots) and the project config. It reads `.bypasser.log.jsonl` locally — no
 network, no API key.
+
+<p align="center">
+  <img src="assets/opencode-panel.png" alt="BypasserAI panel inside the OpenCode sidebar" width="360" />
+</p>
 
 ```bash
 node integrations/opencode/install.mjs   # or: npm run install-panel
@@ -294,6 +299,7 @@ for details, manual install, and uninstall.
 | `BYPASSER_VERBOSE` | `1` → verbose audit/hook output |
 | `BYPASSER_HOOK_EXCLUDED_REPOS` | Comma-separated repo folder names to block `install` |
 | `BYPASSER_SKILL_LOCALE` | `es` → Spanish humanizer prompt (`SKILL.es.md`); default English |
+| `BYPASSER_NOTIFICATIONS` | `off` → disable desktop notifications |
 
 ### Model choice (important)
 
@@ -341,6 +347,7 @@ src/
   cli.ts              Command router
   config.ts           .bypasser.json + env + scope resolution
   detector.ts         Deterministic scorer (language profiles)
+  mask.ts             Masked code/comments/documented views (strings & comments out of scoring)
   rewriter.ts         API client, humanizer prompt, sanitizers
   rewrite-validate.ts Indent / structure heuristics
   rewrite-constants.ts Shared ratio thresholds
@@ -348,16 +355,23 @@ src/
   diff-hunks.ts       Unified diff parse, slice, splice
   chunk-split.ts      Top-level declaration chunking
   concurrency.ts      Bounded parallel rewrite pool
-  git.ts              Staged content, batch cached diff, restage
+  git.ts              Staged content, batch cached diff, restage, tracked files
   installer.ts        Hook install/remove + excluded repos
-  audit.ts            detect → rewrite → restage → log → notify
-  logger.ts           .bypasser.log + structured .bypasser.log.jsonl (incl. per-file signals) + .bypasser.state.json cache
-  notifier.ts         Windows toast pipeline
+  audit.ts            detect → rewrite → restage → log → notify; selectUnresolvedFiles() for --strict
+  logger.ts           .bypasser.log + structured .bypasser.log.jsonl (incl. per-file signals) + .bypasser.state.json cache (batch + prune)
+  stats.ts            Aggregates the structured log for `bypasser stats`
+  secrets.ts          Detects an inline apiKey at risk of being committed
+  notifier.ts         Cross-platform notify (Windows toast + macOS/Linux shell)
   index.ts            Public library exports
 docs/
   SKILL.en.md         Humanizer prompt (default at runtime)
   SKILL.es.md         Humanizer prompt (Spanish)
   SKILL.md            Bilingual index + locale notes
+scripts/
+  bench-detector.ts   Detector benchmark + golden snapshot (test/corpus/corpus.json)
+  test.js             Cross-platform test runner
+test/
+  corpus/             Annotated AI/human samples + detector-snapshot.json
 integrations/
   opencode/           Optional OpenCode TUI panel (install.mjs + bypasser-panel.tsx)
 ```

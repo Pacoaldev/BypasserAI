@@ -233,6 +233,10 @@ señales por familia, delta vs run anterior), histórico del proyecto (tasa de
 éxito, sparkline de tendencia, reincidentes) y la config del proyecto. Lee
 `.bypasser.log.jsonl` localmente — sin red ni API key.
 
+<p align="center">
+  <img src="assets/opencode-panel.png" alt="Panel de BypasserAI dentro del sidebar de OpenCode" width="360" />
+</p>
+
 ```bash
 node integrations/opencode/install.mjs   # o: npm run install-panel
 ```
