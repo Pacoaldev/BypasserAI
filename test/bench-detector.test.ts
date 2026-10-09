@@ -51,22 +51,23 @@ test("bench: detector meets aggregate quality floor", () => {
   // ratchet: raise them when the detector improves, never lower them to make a
   // regression pass.
   //
-  // Known false negatives that keep recall below the JS/TS/Python/Java level
-  // (documented, not hidden): `ai-go-service` (Go, ~0.61), `ai-csharp-controller`
-  // (C#, ~0.59) and `ai-ruby-service` (Ruby, ~0.47) sit under the default
-  // threshold. Their signals are under-weighted for those languages. Raising the
-  // detector's Java/C#/Ruby coverage should let these floors move *up* again.
+  // The service-fingerprint work (narration-transition + Go error-guard +
+  // Ruby postfix-guard signals) brought the three known false negatives
+  // (`ai-go-service`, `ai-csharp-controller`, `ai-ruby-service`) above the
+  // default threshold, so the floors moved up to match: precision 100%,
+  // recall 100%, F1 100%. Keep a small margin so an incidental drift in a
+  // single sample does not fail CI on noise alone.
   assert.ok(
-    metrics.recall >= 0.6,
-    `recall regressed below floor: ${(metrics.recall * 100).toFixed(0)}% (need >= 60%)`
+    metrics.recall >= 0.9,
+    `recall regressed below floor: ${(metrics.recall * 100).toFixed(0)}% (need >= 90%)`
   );
   assert.ok(
     metrics.precision >= 0.9,
     `precision regressed below floor: ${(metrics.precision * 100).toFixed(0)}% (need >= 90%)`
   );
   assert.ok(
-    metrics.f1 >= 0.75,
-    `F1 regressed below floor: ${(metrics.f1 * 100).toFixed(0)}% (need >= 75%)`
+    metrics.f1 >= 0.9,
+    `F1 regressed below floor: ${(metrics.f1 * 100).toFixed(0)}% (need >= 90%)`
   );
 });
 

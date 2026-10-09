@@ -444,6 +444,43 @@ function hasModernTsIdiomSoup(code: string): boolean {
   return total >= 2;
 }
 
+/**
+ * Count "narration transitions": a short *imperative* comment that restates the
+ * statement on the very next line (`// Validate the input` → `if (…)`).
+ *
+ * `hasNarratingComments` already answers "is this file narrated?" as a boolean,
+ * but that only fires on JS/TS/Python where the comment-heavy styles cluster.
+ * The C#, Java, Rust and Ruby AI samples are narrated the *same* way — a comment
+ * above almost every statement — yet scored under threshold because the boolean
+ * signal never saw enough consecutive comment lines for those languages.
+ *
+ * Counting the repetition (not just its presence) is what makes the fingerprint
+ * robust across brace and `end`-delimited languages. It reuses the same
+ * imperative lexicon as `hasNarratingComments` so a substantive *rationale*
+ * comment — longer, with internal punctuation, or carrying `@param`/`Args:`
+ * annotations — is never counted.
+ *
+ * Operates on the **comments view** so a `//` or `#` inside a string can never
+ * be read as narration.
+ */
+function countNarrationTransitions(commentsView: string): number {
+  const NARRATIVE =
+    /^\s*(?:\/\/|#|\*)?\s*(?:Validate|Create|Check|Handle|Get|Set|Fetch|Build|Make|Initialize|Ensure|Return|Iterate|Loop|Parse|Read|Write|Load|Save|Compute|Calculate|Convert|Transform|Process|Add|Remove|Update|Skip|Score|Fire|Wrap|Mark|Record|Apply|Install|Send|Run|Execute|Open|Close|Start|Stop|Filter|Map|Sort|Group|Merge|Split|Join|Retry|Log|Throw|Reset|Clear|Render|Draw|Register|Attach|Bind|Retrieve|Delete|Setup|Configure|Perform|Init|Instantiate)\b[^\n]*$/;
+  let transitions = 0;
+  for (const line of commentsView.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    // Informative doc comments (`@param`, `Args:`) are documentation, not
+    // narration — exclude them the same way `terseDocBlockRatio` does.
+    if (/@\w+|\b(?:Args|Returns|Raises|Parameters)\s*:/.test(line)) continue;
+    // Rationale comments run long and/or carry sentence punctuation; a
+    // narration line is a short imperative restatement.
+    if (trimmed.length > 70 || /[.;:]/.test(trimmed)) continue;
+    if (NARRATIVE.test(line)) transitions++;
+  }
+  return transitions;
+}
+
 /** Count variable declarations and return their captured names. */
 function extractDeclarationNames(code: string, p: LanguageProfile): string[] {
   const names: string[] = [];
@@ -778,6 +815,17 @@ const SIGNALS: SignalDef[] = [
   },
   {
     family: "comments",
+    description: "Narrating comment before most statements (imperative restatement)",
+    // The C#/Java/Rust/Ruby AI fingerprint: `// Validate the input` immediately
+    // above almost every statement. A single such comment is ordinary; four or
+    // more transitions across a file is the tell. Verified against the corpus:
+    // every human sample scores 0 and the AI service samples score 6–14.
+    weight: 0.8,
+    isApplicable: ({ masked }) => masked.comments.trim().length > 0,
+    test: ({ masked }) => countNarrationTransitions(masked.comments) >= 4,
+  },
+  {
+    family: "comments",
     description: "Terse documentation block on (nearly) every function",
     weight: 0.75,
     isApplicable: ({ code, p }) => countFunctions(code, p) >= 2,
@@ -832,6 +880,24 @@ const SIGNALS: SignalDef[] = [
       const asyncFns = countAsyncFunctions(code, p);
       const tryBlocks = countTryBlocks(code, p);
       return asyncFns >= 2 && tryBlocks >= asyncFns;
+    },
+  },
+  {
+    family: "error-handling",
+    description: "Idiomatic error-guard repeated in every function (Go-style)",
+    // The AI Go fingerprint: `if err != nil { return …, err }` (and the `ok`/
+    // `found` twin) restated in every function. Go has no exceptions, so an AI
+    // emits the *same* guard shape everywhere; the repetition is the tell.
+    // Counted on the masked code view so a guard quoted in a comment never
+    // counts. Scoped to Go so no other language's `if … != nil`-alike misfires.
+    weight: 0.6,
+    isApplicable: ({ p }) => p.id === "go",
+    test: ({ code }) => {
+      const errGuards = matchCount(
+        code,
+        /if\s+err\s*!=\s*nil\s*\{|if\s+\w+,\s*err\s*:=\s*[^;]*;\s*err\s*!=\s*nil\s*\{/g
+      );
+      return errGuards >= 2;
     },
   },
 
@@ -892,13 +958,26 @@ const SIGNALS: SignalDef[] = [
       const lines = code.split("\n");
       let bodies = 0;
       let guarded = 0;
+      // Ruby's negated guard is a *postfix* `raise … if cond` / `return … if cond`
+      // — the same defensive shape JS writes as `if (!x) return`, just spelled
+      // the other way round. Count it so a service whose every method opens with
+      // a postfix guard is recognised. `bodies >= 3` (checked after the loop)
+      // keeps short two-method human helpers out of it.
+      const postfixGuard = /^\s*(?:raise|return|next|break)\b[^\n]*\bif\b/;
       for (let i = 0; i < lines.length; i++) {
         const isFn = isFunctionLine(lines[i], p);
         if (!isFn) continue;
         bodies++;
         const next = (lines[i + 1] ?? "").trim();
         const after = (lines[i + 2] ?? "").trim();
-        if (p.negatedGuard.test(next) || p.negatedGuard.test(after)) guarded++;
+        if (
+          p.negatedGuard.test(next) ||
+          p.negatedGuard.test(after) ||
+          postfixGuard.test(next) ||
+          postfixGuard.test(after)
+        ) {
+          guarded++;
+        }
       }
       return bodies >= 3 && guarded / bodies >= 0.6;
     },
