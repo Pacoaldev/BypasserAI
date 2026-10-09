@@ -52,6 +52,17 @@ export interface AuditLogEvent {
     status: string;
     /** Free-text detail for skipped/rejected/error. */
     reason?: string;
+    /**
+     * Per-family detector signals that fired for this file, e.g.
+     * `[{ family: "naming", weight: 2.1 }]`. Optional and additive: events
+     * written before this field existed simply omit it, and consumers
+     * (`bypasser stats`, the OpenCode panel) must tolerate its absence.
+     * Only signals with `fired: true` are persisted, to keep the sidecar small.
+     */
+    signals?: Array<{
+      family: string;
+      weight: number;
+    }>;
   }>;
 }
 
@@ -114,15 +125,15 @@ function emptyState(): BypasserState {
 
 function normalizeState(raw: unknown): BypasserState {
   if (!raw || typeof raw !== "object") return emptyState();
-  const o = raw as Record<string, unknown>;
-  if ("rewrites" in o || "detections" in o) {
+  const obj = raw as Record<string, unknown>;
+  if ("rewrites" in obj || "detections" in obj) {
     return {
-      rewrites: (o.rewrites as Record<string, string>) ?? {},
-      detections: (o.detections as Record<string, DetectionCacheEntry>) ?? {},
+      rewrites: (obj.rewrites as Record<string, string>) ?? {},
+      detections: (obj.detections as Record<string, DetectionCacheEntry>) ?? {},
     };
   }
   // Legacy flat map: path -> rewrite hash only
-  return { rewrites: o as Record<string, string>, detections: {} };
+  return { rewrites: obj as Record<string, string>, detections: {} };
 }
 
 export function loadBypasserState(cwd: string): BypasserState {
@@ -181,10 +192,10 @@ export function recordRewrite(
   hash: string,
   state?: BypasserState
 ): BypasserState {
-  const next = state ?? loadBypasserState(cwd);
-  recordRewriteInMemory(next, filePath, hash);
-  saveBypasserState(cwd, next);
-  return next;
+  const s = state ?? loadBypasserState(cwd);
+  recordRewriteInMemory(s, filePath, hash);
+  saveBypasserState(cwd, s);
+  return s;
 }
 
 /** @deprecated writes through on every call — prefer InMemory variants. */
@@ -195,10 +206,10 @@ export function recordDetection(
   score: number,
   state?: BypasserState
 ): BypasserState {
-  const next = state ?? loadBypasserState(cwd);
-  recordDetectionInMemory(next, filePath, contentHash, score);
-  saveBypasserState(cwd, next);
-  return next;
+  const s = state ?? loadBypasserState(cwd);
+  recordDetectionInMemory(s, filePath, contentHash, score);
+  saveBypasserState(cwd, s);
+  return s;
 }
 
 export function cachedDetectionScore(

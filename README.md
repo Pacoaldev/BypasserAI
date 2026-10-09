@@ -56,6 +56,7 @@ It is **language-agnostic** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, and m
 | **String/comment masking** | Signals run on masked views, so a `//` in a string or a `function` inside a regex literal never inflates the score. |
 | **CI gate** | `bypasser audit --strict` fails the job when an AI-shaped file could not be humanized; reusable GitHub Action included. |
 | **Audit telemetry** | `bypasser stats` aggregates a structured `.bypasser.log.jsonl` — success rate by provider/model, rejection reasons, repeat offenders. |
+| **Live panel in OpenCode** | Optional [TUI plugin](integrations/opencode/README.md) shows the last run, per-family signals, trend and hotspots inside the OpenCode sidebar. |
 | **Agent-friendly** | [`AGENTS.md`](AGENTS.md) documents architecture and invariants for AI coding tools. |
 
 ---
@@ -223,6 +224,23 @@ bypasser audit --verbose
 
 ---
 
+## OpenCode panel (optional)
+
+If you use [OpenCode](https://opencode.ai), a bundled **TUI plugin** shows your
+BypasserAI data live in the right sidebar — last run (files, scores, per-family
+signals, delta vs previous run), project history (success rate, trend sparkline,
+hotspots) and the project config. It reads `.bypasser.log.jsonl` locally — no
+network, no API key.
+
+```bash
+node integrations/opencode/install.mjs   # or: npm run install-panel
+```
+
+Then restart OpenCode. See [integrations/opencode/README.md](integrations/opencode/README.md)
+for details, manual install, and uninstall.
+
+---
+
 ## CLI reference
 
 | Command | Description |
@@ -333,13 +351,15 @@ src/
   git.ts              Staged content, batch cached diff, restage
   installer.ts        Hook install/remove + excluded repos
   audit.ts            detect → rewrite → restage → log → notify
-  logger.ts           .bypasser.log + .bypasser.state.json cache
+  logger.ts           .bypasser.log + structured .bypasser.log.jsonl (incl. per-file signals) + .bypasser.state.json cache
   notifier.ts         Windows toast pipeline
   index.ts            Public library exports
 docs/
   SKILL.en.md         Humanizer prompt (default at runtime)
   SKILL.es.md         Humanizer prompt (Spanish)
   SKILL.md            Bilingual index + locale notes
+integrations/
+  opencode/           Optional OpenCode TUI panel (install.mjs + bypasser-panel.tsx)
 ```
 
 ---

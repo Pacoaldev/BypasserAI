@@ -34,6 +34,7 @@ src/installer.ts         → writes/removes the pre-commit hook; `HOOK_INSTALL_E
 src/audit.ts             → full pipeline: detect → rewrite → restage → log → notify; `selectUnresolvedFiles()` powers `--strict`
 src/logger.ts            → appends .bypasser.log + structured .bypasser.log.jsonl; persists rewrite hashes and detection cache in .bypasser.state.json (batched + pruned)
 src/stats.ts             → aggregates the structured log for `bypasser stats`
+integrations/opencode/   → optional OpenCode TUI panel (install.mjs registers bypasser-panel.tsx in tui.json); reads .bypasser.log.jsonl + .bypasser.json locally
 src/secrets.ts           → detects an inline apiKey at risk of being committed
 src/notifier.ts          → cross-platform notify (Windows toast + macOS/Linux shell), opt-in via `notifications`
 src/index.ts             → public library exports
@@ -233,6 +234,12 @@ When editing `src/rewriter.ts`, the temperature comes from `config.temperature` 
 ### Detection cache (`.bypasser.state.json`)
 
 `audit.ts` skips re-scoring unchanged files: `cachedDetectionScore(state, path, hash)` returns a prior score when the content hash matches; otherwise the file is scored and `recordDetection` persists it. Successful rewrites are keyed by content hash via `recordRewrite` so `rewriteFile` can skip already-humanized content (`res.skipped`). `logger.ts` owns this sidecar store and tolerates legacy flat-map state.
+
+### Structured audit log (`.bypasser.log.jsonl`)
+
+One `AuditLogEvent` per audit run, append-only and best-effort (a write failure never blocks the commit). Consumers must tolerate a **corrupt/half-written last line** (a killed hook) — `readAuditEvents` and the OpenCode panel both skip malformed lines and keep the rest. `provider` is reduced to the URL **host** so an API key embedded in a proxy URL can never be persisted.
+
+`files[].signals` (optional, additive) records the detector signals that **fired** for that file as `[{ family, weight }]`. It is written by `_writeLogAndNotify` in `audit.ts`. Events written before this field existed omit it and must keep rendering — `bypasser stats` ignores it, and `integrations/opencode/bypasser-panel.tsx` shows the per-family breakdown only when present. Keep it additive: do not make `stats` or the panel *require* it.
 
 ### Truncation / integrity guards (never remove)
 

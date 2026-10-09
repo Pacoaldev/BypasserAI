@@ -212,9 +212,7 @@ export async function runAudit(opts: {
   }
 
   if (pending.length > 0 && !opts.dryRun) {
-    const maxTimeout = Math.max(
-      ...pending.map((p) => scaledTimeoutMs(config, p.lineCount))
-    );
+    const maxTimeout = Math.max(...pending.map((p) => scaledTimeoutMs(config, p.lineCount)));
     const client = createRewriteClient(config, maxTimeout);
 
     const rewriteOutcomes = await mapPool(pending, config.rewriteConcurrency, (item) =>
@@ -325,11 +323,7 @@ async function processRewrite(
   }
 }
 
-function _writeLogAndNotify(
-  cwd: string,
-  config: BypasserConfig,
-  result: AuditResult
-): void {
+function _writeLogAndNotify(cwd: string, config: BypasserConfig, result: AuditResult): void {
   const logLines: string[] = [];
 
   for (const f of result.files) {
@@ -362,7 +356,9 @@ function _writeLogAndNotify(
     );
   }
   if (result.errorFiles > 0) {
-    logLines.push(`  → ${result.errorFiles} file(s) could NOT be rewritten (API error) — see lines above`);
+    logLines.push(
+      `  → ${result.errorFiles} file(s) could NOT be rewritten (API error) — see lines above`
+    );
   }
 
   writeLog(cwd, logLines);
@@ -385,6 +381,9 @@ function _writeLogAndNotify(
       threshold: f.threshold,
       status: auditFileStatus(f),
       reason: f.skippedReason,
+      signals: f.signals
+        .filter((s) => s.fired)
+        .map((s) => ({ family: s.family, weight: s.weight })),
     })),
   });
 

@@ -15,10 +15,12 @@
     "bench": "node --import tsx scripts/bench-detector.ts",
     "typecheck": "tsc -p tsconfig.test.json",
     "lint": "eslint .",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\""
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "install-panel": "node integrations/opencode/install.mjs"
   },
   "files": [
     "dist",
+    "integrations/opencode",
     "docs/SKILL.md",
     "docs/SKILL.en.md",
     "docs/SKILL.es.md",

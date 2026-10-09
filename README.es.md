@@ -56,6 +56,7 @@ Es **agnóstico al lenguaje** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, etc
 | **Máscara de strings/comentarios** | Las señales operan sobre vistas enmascaradas, así un `//` dentro de un string o un `function` dentro de un regex literal nunca infla el score. |
 | **Gate de CI** | `bypasser audit --strict` falla el job si un archivo con forma de IA no se pudo humanizar; incluye GitHub Action reutilizable. |
 | **Telemetría de auditoría** | `bypasser stats` agrega el log estructurado `.bypasser.log.jsonl`: tasa de éxito por proveedor/modelo, motivos de rechazo y reincidentes. |
+| **Panel en vivo en OpenCode** | Plugin TUI opcional ([integrations/opencode](integrations/opencode/README.md)) que muestra el último run, señales por familia, tendencia y reincidentes en el sidebar de OpenCode. |
 | **Listo para agentes** | [`AGENTS.md`](AGENTS.md) documenta arquitectura e invariantes para herramientas de IA. |
 
 ---
@@ -224,6 +225,23 @@ bypasser audit --verbose
 
 ---
 
+## Panel de OpenCode (opcional)
+
+Si usas [OpenCode](https://opencode.ai), un **plugin TUI** incluido muestra tus
+datos de BypasserAI en vivo en el sidebar derecho: último run (archivos, scores,
+señales por familia, delta vs run anterior), histórico del proyecto (tasa de
+éxito, sparkline de tendencia, reincidentes) y la config del proyecto. Lee
+`.bypasser.log.jsonl` localmente — sin red ni API key.
+
+```bash
+node integrations/opencode/install.mjs   # o: npm run install-panel
+```
+
+Luego reinicia OpenCode. Detalles, instalación manual y desinstalación en
+[integrations/opencode/README.md](integrations/opencode/README.md).
+
+---
+
 ## Referencia CLI
 
 | Comando | Descripción |
@@ -350,6 +368,8 @@ scripts/
   test.js             Runner de tests multiplataforma
 test/
   corpus/             Muestras AI/human anotadas + detector-snapshot.json
+integrations/
+  opencode/           Panel TUI opcional para OpenCode (install.mjs + bypasser-panel.tsx)
 ```
 
 ---

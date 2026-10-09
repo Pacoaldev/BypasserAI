@@ -5,7 +5,7 @@ import globals from "globals";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "assets/**"],
+    ignores: ["dist/**", "node_modules/**", "assets/**", "integrations/**/*.tsx"],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
@@ -23,6 +23,12 @@ export default tseslint.config(
   },
   {
     files: ["scripts/**/*.js", "eslint.config.js"],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
+  {
+    files: ["integrations/**/*.mjs"],
     languageOptions: {
       globals: { ...globals.node },
     },
