@@ -4,7 +4,7 @@
   "description": "Pre-commit hook that detects AI-generated code patterns and rewrites them via any OpenAI-compatible API.",
   "type": "module",
   "bin": {
-    "bypasser": "./dist/cli.js"
+    "bypasser": "dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
