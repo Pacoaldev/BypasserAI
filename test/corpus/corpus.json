@@ -56,6 +56,62 @@
       "lang": "go",
       "path": "internal/user/service.go",
       "code": "package user\n\nimport (\n\t\"context\"\n\t\"errors\"\n)\n\n// UserService provides operations for managing users.\ntype UserService struct {\n\trepo UserRepository\n}\n\n// NewUserService creates a new instance of UserService.\nfunc NewUserService(repo UserRepository) *UserService {\n\treturn &UserService{repo: repo}\n}\n\n// GetUser retrieves a user by their unique identifier.\nfunc (s *UserService) GetUser(ctx context.Context, id string) (*User, error) {\n\tif id == \"\" {\n\t\treturn nil, errors.New(\"user ID cannot be empty\")\n\t}\n\tuser, err := s.repo.FindByID(ctx, id)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn user, nil\n}\n\n// ProcessUserData processes the user data and returns the result.\nfunc (s *UserService) ProcessUserData(ctx context.Context, data []byte) ([]byte, error) {\n\ttransformedData, err := transformData(data)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn transformedData, nil\n}"
+    },
+    {
+      "id": "ai-java-service",
+      "label": "ai",
+      "lang": "java",
+      "path": "src/main/java/com/example/user/UserService.java",
+      "code": "package com.example.user;\n\nimport org.springframework.stereotype.Service;\n\n/**\n * Service class responsible for managing user operations.\n */\n@Service\npublic class UserService {\n\n    private final UserRepository userRepository;\n\n    /**\n     * Constructs a new UserService.\n     */\n    public UserService(UserRepository userRepository) {\n        this.userRepository = userRepository;\n    }\n\n    /**\n     * Retrieves a user by their unique identifier.\n     */\n    public User getUserById(String userId) {\n        // Validate the input parameter\n        if (userId == null || userId.isEmpty()) {\n            throw new IllegalArgumentException(\"User ID cannot be null or empty\");\n        }\n        // Retrieve the user from the repository\n        User user = userRepository.findById(userId).orElse(null);\n        // Return the retrieved user\n        return user;\n    }\n\n    /**\n     * Processes the user data and returns the result.\n     */\n    public byte[] processUserData(byte[] userData) {\n        // Validate the input data\n        if (userData == null) {\n            return new byte[0];\n        }\n        // Transform the data\n        byte[] transformedData = DataTransformer.transform(userData);\n        // Return the transformed data\n        return transformedData;\n    }\n\n    /**\n     * Deletes a user by their unique identifier.\n     */\n    public void deleteUserById(String userId) {\n        // Validate the input parameter\n        if (userId == null || userId.isEmpty()) {\n            throw new IllegalArgumentException(\"User ID cannot be null or empty\");\n        }\n        // Delete the user from the repository\n        userRepository.deleteById(userId);\n    }\n}"
+    },
+    {
+      "id": "human-java-plain",
+      "label": "human",
+      "lang": "java",
+      "path": "src/main/java/com/example/Retry.java",
+      "code": "package com.example;\n\nimport java.util.concurrent.Callable;\n\npublic final class Retry {\n\n    @FunctionalInterface\n    public interface Op<T> {\n        T run() throws Exception;\n    }\n\n    public static <T> T withBackoff(int attempts, long baseMs, Op<T> op) throws Exception {\n        Exception last = null;\n        for (int i = 0; i < attempts; i++) {\n            try {\n                return op.run();\n            } catch (Exception e) {\n                last = e;\n                Thread.sleep(baseMs << i);\n            }\n        }\n        throw last;\n    }\n}"
+    },
+    {
+      "id": "ai-csharp-controller",
+      "label": "ai",
+      "lang": "csharp",
+      "path": "src/Controllers/UserController.cs",
+      "code": "using Microsoft.AspNetCore.Mvc;\nusing System.Threading.Tasks;\n\nnamespace Example.Controllers\n{\n    /**\n     * Controller responsible for handling user-related requests.\n     */\n    [ApiController]\n    [Route(\"api/[controller]\")]\n    public class UserController : ControllerBase\n    {\n        private readonly IUserService _userService;\n\n        /**\n         * Initializes a new instance of the UserController class.\n         */\n        public UserController(IUserService userService)\n        {\n            _userService = userService;\n        }\n\n        /**\n         * Retrieves a user by their unique identifier.\n         */\n        [HttpGet(\"{userId}\")]\n        public async Task<IActionResult> GetUserById(string userId)\n        {\n            // Validate the input parameter\n            if (string.IsNullOrEmpty(userId))\n            {\n                return BadRequest(\"User ID cannot be null or empty\");\n            }\n            // Retrieve the user from the service\n            var user = await _userService.GetUserByIdAsync(userId);\n            // Return the retrieved user\n            return Ok(user);\n        }\n\n        /**\n         * Processes the submitted user data.\n         */\n        [HttpPost(\"process\")]\n        public async Task<IActionResult> ProcessUserData(byte[] data)\n        {\n            // Validate the input data\n            if (data == null)\n            {\n                return BadRequest(\"Data cannot be null\");\n            }\n            // Process the data\n            var result = await _userService.ProcessUserDataAsync(data);\n            // Return the processed result\n            return Ok(result);\n        }\n\n        /**\n         * Deletes a user by their unique identifier.\n         */\n        [HttpDelete(\"{userId}\")]\n        public async Task<IActionResult> DeleteUserById(string userId)\n        {\n            // Validate the input parameter\n            if (string.IsNullOrEmpty(userId))\n            {\n                return BadRequest(\"User ID cannot be null or empty\");\n            }\n            // Delete the user from the service\n            await _userService.DeleteUserByIdAsync(userId);\n            // Return the result\n            return NoContent();\n        }\n    }\n}"
+    },
+    {
+      "id": "human-csharp-linq",
+      "label": "human",
+      "lang": "csharp",
+      "path": "src/Batching.cs",
+      "code": "using System.Collections.Generic;\nusing System.Linq;\n\nnamespace Example\n{\n    public static class Batching\n    {\n        public static IEnumerable<IReadOnlyList<T>> Chunk<T>(this IEnumerable<T> src, int size)\n        {\n            var batch = new List<T>(size);\n            foreach (var item in src)\n            {\n                batch.Add(item);\n                if (batch.Count == size)\n                {\n                    yield return batch;\n                    batch = new List<T>(size);\n                }\n            }\n            if (batch.Count > 0) yield return batch;\n        }\n    }\n}"
+    },
+    {
+      "id": "ai-rust-handler",
+      "label": "ai",
+      "lang": "rust",
+      "path": "src/handlers/user.rs",
+      "code": "use crate::models::User;\nuse crate::repository::UserRepository;\n\n/// Service responsible for managing user operations.\npub struct UserService {\n    repository: UserRepository,\n}\n\nimpl UserService {\n    /// Creates a new instance of UserService.\n    pub fn new(repository: UserRepository) -> Self {\n        Self { repository }\n    }\n\n    /// Retrieves a user by their unique identifier.\n    /// Returns an error if the user is not found.\n    pub fn get_user_by_id(&self, user_id: &str) -> Result<User, String> {\n        // Validate the input parameter\n        if user_id.is_empty() {\n            return Err(\"User ID cannot be empty\".to_string());\n        }\n        // Retrieve the user from the repository\n        let user = self.repository.find_by_id(user_id);\n        // Return the retrieved user\n        user.ok_or_else(|| \"User not found\".to_string())\n    }\n\n    /// Processes the user data and returns the result.\n    pub fn process_user_data(&self, data: &[u8]) -> Result<Vec<u8>, String> {\n        // Validate the input data\n        if data.is_empty() {\n            return Ok(Vec::new());\n        }\n        // Transform the data\n        let transformed = transform_data(data);\n        // Return the transformed data\n        Ok(transformed)\n    }\n}"
+    },
+    {
+      "id": "human-rust-iter",
+      "label": "human",
+      "lang": "rust",
+      "path": "src/parse.rs",
+      "code": "pub fn parse_ports(spec: &str) -> Result<Vec<u16>, String> {\n    let mut out = Vec::new();\n    for part in spec.split(',') {\n        let part = part.trim();\n        if part.is_empty() {\n            continue;\n        }\n        match part.split_once('-') {\n            Some((a, b)) => {\n                let lo: u16 = a.parse().map_err(|_| format!(\"bad port {a}\"))?;\n                let hi: u16 = b.parse().map_err(|_| format!(\"bad port {b}\"))?;\n                out.extend(lo..=hi);\n            }\n            None => out.push(part.parse().map_err(|_| format!(\"bad port {part}\"))?),\n        }\n    }\n    Ok(out)\n}"
+    },
+    {
+      "id": "ai-ruby-service",
+      "label": "ai",
+      "lang": "ruby",
+      "path": "app/services/user_service.rb",
+      "code": "# Service class responsible for managing user operations.\nclass UserService\n  # Initializes a new instance of UserService.\n  def initialize(repository)\n    @repository = repository\n  end\n\n  # Retrieves a user by their unique identifier.\n  # Returns nil if the user is not found.\n  def get_user_by_id(user_id)\n    # Validate the input parameter\n    raise ArgumentError, 'User ID cannot be empty' if user_id.to_s.empty?\n\n    # Retrieve the user from the repository\n    user = @repository.find_by_id(user_id)\n\n    # Return the retrieved user\n    user\n  end\n\n  # Processes the user data and returns the result.\n  def process_user_data(data)\n    # Validate the input data\n    return [] if data.nil?\n\n    # Transform the data\n    transformed_data = data.map { |item| item.to_s.strip }\n\n    # Return the transformed data\n    transformed_data\n  end\n\n  # Deletes a user by their unique identifier.\n  def delete_user_by_id(user_id)\n    # Validate the input parameter\n    raise ArgumentError, 'User ID cannot be empty' if user_id.to_s.empty?\n\n    # Delete the user from the repository\n    @repository.delete_by_id(user_id)\n  end\nend"
+    },
+    {
+      "id": "human-ruby-glue",
+      "label": "human",
+      "lang": "ruby",
+      "path": "lib/env.rb",
+      "code": "# frozen_string_literal: true\n\nmodule Env\n  def self.int(name, default)\n    v = ENV[name]\n    return default if v.nil? || v.empty?\n    Integer(v, 10)\n  rescue ArgumentError\n    default\n  end\n\n  def self.bool(name, default = false)\n    v = ENV[name]\n    return default if v.nil?\n    %w[1 true yes on].include?(v.downcase)\n  end\nend"
     }
   ]
 }
