@@ -14,5 +14,7 @@
   "human-py-glue": 0,
   "human-ruby-glue": 0,
   "human-rust-iter": 0.44,
-  "human-ts-terse": 0
+  "human-ts-professional": 0.542,
+  "human-ts-terse": 0,
+  "human-ts-typed-repo": 0
 }

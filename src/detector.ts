@@ -399,6 +399,12 @@ function hasExhaustiveAnnotations(code: string, p: LanguageProfile): boolean {
       code.match(/\([^)]*\w+\s*:\s*(?:string|number|boolean|\w+\[\]|Record<|Promise<|Array<|[\w.]+<)/g) ?? []
     ).length;
     const typedReturns = (code.match(/\)\s*:\s*(?:Promise<|void|string|number|boolean|[\w.]+<|[\w.]+\[\])/g) ?? []).length;
+    // A *small* file where every function is fully typed is ordinary strict
+    // TypeScript, not an AI tell — a human writing 3-5 documented helpers in a
+    // `strict` project annotates them all too. The AI fingerprint is exhaustive
+    // typing at *scale* (a payload type and full signatures on everything in a
+    // large module). Require a meaningful function count before firing.
+    if (fns < 6) return false;
     return typedParams >= fns * 0.6 && typedReturns >= fns * 0.4;
   }
   return false;
@@ -567,9 +573,27 @@ function terseDocBlockRatio(documented: string, p: LanguageProfile): number {
     }
     const contentLines = block
       .split("\n")
+      // Some profiles' docBlock regex (Go, C# `///`) deliberately spans to the
+      // declaration line, so a `func`/`type` token would leak in and fake a
+      // "second clause" (`. func`). Drop any line that looks like code.
+      .filter(
+        (l) => !/^\s*(?:func|type|var|const|class|def|fn|public|private|protected|struct|interface|enum)\b/.test(l)
+      )
       .map((l) => l.replace(/^[\s/*#"'`]+|[\s*/"'`]+$/g, "").trim())
       .filter((l) => l.length > 0);
-    if (contentLines.length <= 2) terse++;
+    // Short is necessary but not sufficient for "terse". AI restates the
+    // signature in one flat sentence ("Fetches the user."); a human one-liner
+    // carries a *second* piece of information — a returned value, an edge case,
+    // a constraint — as a genuine extra clause. Detect that with a sentence
+    // boundary: a `.`/`—` followed by more prose (not merely the final period).
+    // This is what separates a documented human codebase from AI slop where
+    // *every* method wears the same flat one-liner.
+    if (contentLines.length <= 2) {
+      const flat = contentLines.join(" ");
+      const hasSecondClause =
+        /[.!?]\s+\S/.test(flat) || /—/.test(flat) || /\([^)]{8,}\)/.test(flat);
+      if (!hasSecondClause) terse++;
+    }
     if (m.index === re.lastIndex) re.lastIndex++;
   }
   return total === 0 ? 0 : terse / total;
