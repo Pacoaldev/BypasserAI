@@ -9,7 +9,20 @@ export interface NotifyOptions {
   message: string;
   /** "info" | "warning" | "error" — maps to toast icon */
   type?: "info" | "warning" | "error";
+  /**
+   * Why this notification is being raised. Used to honour the `important`
+   * mode, which only surfaces actionable outcomes:
+   *   - `humanized` — ≥1 file was rewritten before commit.
+   *   - `error`     — a file needed rewriting but the API call failed.
+   *   - `rejected`  — a rewrite failed safety checks; originals kept.
+   *   - `clean`     — nothing to do, all files ok.
+   * Defaults to `humanized` when omitted so callers that predate this field
+   * keep their previous (notify-worthy) behaviour under `important`.
+   */
+  event?: NotifyEvent;
 }
+
+export type NotifyEvent = "humanized" | "error" | "rejected" | "clean";
 
 export interface NotifyDeps {
   /** Platform to target; injectable for tests. Defaults to process.platform. */
@@ -278,11 +291,36 @@ export function notificationCommand(
  * pipeline or a macOS/Linux shell notifier. A no-op when `mode` is `"off"` or
  * on an unsupported platform. Never throws, never blocks the commit.
  */
+/**
+ * Whether a given notification should actually fire for `mode`.
+ *
+ * Centralises the mode policy so both `notify()` here and any caller reasoning
+ * about notifications agree:
+ *   - `off`       → never.
+ *   - `important` → only `humanized` and `error` (the actionable outcomes);
+ *                   `clean` and `rejected` stay silent.
+ *   - `auto`      → always.
+ */
+export function shouldNotify(
+  mode: NotificationMode | undefined,
+  event: NotifyEvent | undefined
+): boolean {
+  const m = mode ?? "auto";
+  if (m === "off") return false;
+  if (m === "important") {
+    // Default to the actionable side when an event is not supplied, matching
+    // the documented default of `NotifyOptions.event`.
+    const ev = event ?? "humanized";
+    return ev === "humanized" || ev === "error";
+  }
+  return true;
+}
+
 export function notify(
   opts: NotifyOptions & { mode?: NotificationMode },
   deps: NotifyDeps = {}
 ): void {
-  if ((opts.mode ?? "auto") === "off") return;
+  if (!shouldNotify(opts.mode, opts.event)) return;
 
   const platform = deps.platform ?? process.platform;
   if (platform === "win32") {

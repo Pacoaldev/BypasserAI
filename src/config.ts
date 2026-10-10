@@ -55,13 +55,16 @@ export interface BypasserConfig {
   /**
    * Desktop notification behaviour after an audit.
    *   - `auto` (default): show a toast on Windows / a shell notification on
-   *     macOS and Linux.
+   *     macOS and Linux for every outcome.
+   *   - `important`: notify only when something needs your attention — a file
+   *     was humanized (rewritten) or a rewrite FAILED (API error). Clean runs
+   *     and rejected rewrites stay silent.
    *   - `off`: never notify (useful in CI, headless boxes, or noisy terminals).
    */
   notifications: NotificationMode;
 }
 
-export type NotificationMode = "auto" | "off";
+export type NotificationMode = "auto" | "off" | "important";
 
 export type RewriteScopeMode = "file" | "diff" | "chunk" | "auto";
 export type EffectiveRewriteScope = "file" | "diff" | "chunk";
@@ -202,14 +205,20 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
   };
 }
 
-/** `Notifications: off` in the file or `BYPASSER_NOTIFICATIONS=off` disables. */
+/** `notifications: off` in the file or `BYPASSER_NOTIFICATIONS=off` disables. */
 function parseNotificationMode(
   fileValue: unknown,
   envValue: string | undefined,
   fallback: NotificationMode
 ): NotificationMode {
   const candidate = envValue ?? fileValue;
-  if (candidate === "off" || candidate === "auto") return candidate;
+  if (
+    candidate === "off" ||
+    candidate === "auto" ||
+    candidate === "important"
+  ) {
+    return candidate;
+  }
   return fallback;
 }
 

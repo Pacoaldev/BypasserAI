@@ -202,7 +202,7 @@ Detalle: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusio
 |-------|---------|
 | **Salida del hook** | Puntuación compacta por archivo + humanized / ok / skipped / failed |
 | **`.bypasser.log`** | Historial con marcas de tiempo y señales disparadas (ideal dejarlo abierto en una pestaña) |
-| **Notificación de escritorio** | Clean / Humanized / Rewrite failed (opcional; `notifications: auto` por defecto) |
+| **Notificación de escritorio** | Clean / Humanized / Rewrite failed (opcional; `notifications: auto` por defecto, `important` solo humanizado + fallos) |
 
 Ejemplo de log:
 
@@ -284,7 +284,7 @@ Luego reinicia OpenCode. Detalles, instalación manual y desinstalación en
 | `contextLines` | `60` | Contexto alrededor de hunks |
 | `maxChunkLines` | `450` | Máximo de líneas por chunk |
 | `structuralCheck` | `true` | Rechaza reescrituras que pierden demasiadas declaraciones top-level |
-| `notifications` | `auto` | `auto` (toast en Windows, notificación de shell en macOS/Linux) · `off` (nunca) |
+| `notifications` | `auto` | `auto` (notifica siempre) · `important` (solo humanizado + fallos de rewrite) · `off` (nunca) |
 
 **Variables de entorno** (pisan el fichero; recomendadas para secretos):
 
@@ -297,7 +297,7 @@ Luego reinicia OpenCode. Detalles, instalación manual y desinstalación en
 | `BYPASSER_VERBOSE` | `1` → salida verbose en audit/hook |
 | `BYPASSER_HOOK_EXCLUDED_REPOS` | Nombres de carpeta de repo separados por comas para bloquear `install` |
 | `BYPASSER_SKILL_LOCALE` | `es` → prompt humanizer en español; por defecto inglés |
-| `BYPASSER_NOTIFICATIONS` | `off` → desactiva las notificaciones de escritorio |
+| `BYPASSER_NOTIFICATIONS` | `auto` \| `important` \| `off` → sobrescribe el modo de notificación |
 
 ### Elección de modelo (importante)
 

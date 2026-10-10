@@ -394,6 +394,7 @@ function _writeLogAndNotify(cwd: string, config: BypasserConfig, result: AuditRe
       message: `${result.rewrittenFiles} file(s) rewritten before commit.`,
       type: "warning",
       mode,
+      event: "humanized",
     });
   } else if (result.errorFiles > 0) {
     notify({
@@ -401,6 +402,7 @@ function _writeLogAndNotify(cwd: string, config: BypasserConfig, result: AuditRe
       message: `${result.errorFiles} file(s) needed rewriting but the API call failed. Check .bypasser.log.`,
       type: "error",
       mode,
+      event: "error",
     });
   } else if (result.rejectedFiles > 0) {
     notify({
@@ -408,6 +410,7 @@ function _writeLogAndNotify(cwd: string, config: BypasserConfig, result: AuditRe
       message: `${result.rejectedFiles} file(s) failed safety checks; originals kept.`,
       type: "warning",
       mode,
+      event: "rejected",
     });
   } else {
     notify({
@@ -415,6 +418,7 @@ function _writeLogAndNotify(cwd: string, config: BypasserConfig, result: AuditRe
       message: `${result.totalFiles} file(s) scanned. All ok.`,
       type: "info",
       mode,
+      event: "clean",
     });
   }
 }

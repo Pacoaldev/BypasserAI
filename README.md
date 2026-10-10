@@ -202,7 +202,7 @@ Details: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusio
 |---------|----------------|
 | **Hook stdout** | Compact per-file score + humanized / ok / skipped / failed |
 | **`.bypasser.log`** | Timestamped history with fired signals (great tab to leave open) |
-| **Desktop notification** | Clean / Humanized / Rewrite failed (optional; `notifications: auto` by default) |
+| **Desktop notification** | Clean / Humanized / Rewrite failed (optional; `notifications: auto` by default, `important` for humanized + failures only) |
 
 Example log excerpt:
 
@@ -284,7 +284,7 @@ for details, manual install, and uninstall.
 | `contextLines` | `60` | Context around diff hunks |
 | `maxChunkLines` | `450` | Max lines per chunk |
 | `structuralCheck` | `true` | Reject rewrites that drop too many top-level declarations |
-| `notifications` | `auto` | `auto` (toast on Windows, shell notify on macOS/Linux) · `off` (never) |
+| `notifications` | `auto` | `auto` (notify every outcome) · `important` (only humanized + rewrite failures) · `off` (never) |
 
 **Environment variables** (override file config; preferred for secrets):
 
@@ -297,7 +297,7 @@ for details, manual install, and uninstall.
 | `BYPASSER_VERBOSE` | `1` → verbose audit/hook output |
 | `BYPASSER_HOOK_EXCLUDED_REPOS` | Comma-separated repo folder names to block `install` |
 | `BYPASSER_SKILL_LOCALE` | `es` → Spanish humanizer prompt (`SKILL.es.md`); default English |
-| `BYPASSER_NOTIFICATIONS` | `off` → disable desktop notifications |
+| `BYPASSER_NOTIFICATIONS` | `auto` \| `important` \| `off` → override the notification mode |
 
 ### Model choice (important)
 
