@@ -20,7 +20,7 @@ import { splitIntoChunks } from "./chunk-split.js";
 import { looksIndentBroken, looksStructurallyBroken, looksStubbed } from "./rewrite-validate.js";
 import { checkSyntax } from "./syntax-guard.js";
 import { resolveLanguage } from "./detector.js";
-import { hasUnbalancedBrackets, balanceRegressed } from "./bracket-balance.js";
+import { balanceRegressed } from "./bracket-balance.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
