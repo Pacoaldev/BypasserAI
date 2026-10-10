@@ -179,6 +179,18 @@ Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_U
 
 Default model **`gpt-4o-mini`** is the shipped baseline; for large files/chunks prefer a model that returns the fragment at full length and re-validate truncation on your endpoint.
 
+### Model choice matters more than any knob (measured)
+
+Rewrite quality is dominated by the model, not the pipeline. A measured comparison (same prompt/guards, ~50-line AI files, Python + TS) found:
+
+- **`zd/claude-sonnet-4-5` silently corrupts**: it replaced real `return [...]` / `raise HTTPException(...)` with `# [1 lines omitted]` + `pass` **3/3 times**, on a file that still *parses* — a semantic corruption only the `looksStubbed` guard (above) now catches. It was also the slowest of the viable set.
+- **`cerebras/gpt-oss-120b`** — fastest (~0.8 s), preserves logic on normal files, no omission markers. Good default when a fast non-local endpoint is acceptable.
+- **`ollama/gpt-oss:120b`** — ~2.5 s, local (no external endpoint), same quality profile as Cerebras.
+- **Mistral**: `magistral-medium-latest` / `mistral-medium-latest` are clean on simple files but **collapse to a single line** or lose logic on complex ones; `mistral-small-latest` corrupts; `codestral-latest` **reorders `router = APIRouter()` below its own decorators** (parses, fails at runtime).
+- **MiniMax** (`minimax-cn/*`, `kr/minimax-*`, `cbai/minimax-*`): rejected across the board (syntax/indent/prose) or heavy keyword loss.
+
+No model is perfect on complex logic — a plausible-but-wrong rewrite of a tangled function is not something a regex guard can catch, so the safety net is the guard chain, not the model. On very complex files the guards *rejecting* a rewrite (and keeping the original) is the correct, safe outcome. `.bypasser.json` is machine-local and gitignored, so per-machine model choice is config, not code.
+
 Built-in ignore globs (`BUILT_IN_IGNORE` in `config.ts`) always skip lockfiles, `dist/**`, minified assets, most `*.json`/`*.yaml`, and bypasser artifacts (`*.bak`, `*.bypasser.tmp`).
 
 Any OpenAI-compatible endpoint works: OpenAI, Ollama, LM Studio, OpenRouter, Groq, Anthropic via proxy.
@@ -253,6 +265,7 @@ A rewrite must **never** silently lose or corrupt a file. This is a hard invaria
 4. `looksIndentBroken()` (`rewrite-validate.ts`) — rejects a rewrite that systemically flattens indentation (correct tokens, wrong structure).
 5. `looksStructurallyBroken()` (`rewrite-validate.ts`) — rejects a rewrite that drops too many top-level declarations (gated by `structuralCheck`).
 6. `checkSyntax()` (`syntax-guard.ts`) — parses the **assembled** file with a real parser: Python via `compile()` through the `python`/`python3`/`py` interpreter, JSON via `JSON.parse`. Catches a *micro*-misindentation (a single line at the wrong level) that the conservative indent heuristic above deliberately ignores — the exact failure that produced an `IndentationError` in a ~2800-line Python file reassembled from LLM chunks. Best-effort: if no interpreter is found (`unavailable`) or the language has no cheap local parser (`unsupported`), it does **not** block. Applied in `validateAssembledFile()` (the whole-file backstop, which is what actually saves the case) and in `rewriteFullFile()`. New `InvalidReason: "syntax"`. Do **not** parse isolated fragments (a fragment without its parent `def` never parses alone → false rejects).
+7. `looksStubbed()` (`rewrite-validate.ts`) — rejects a response carrying an explicit **"N lines omitted"** marker (`# [1 lines omitted]`, `// [3 lines omitted]`, `[N lines omitted]`, `... omitted`). This is the *silent* corruption some models produce under pressure: observed on **`zd/claude-sonnet-4-5`**, which replaced a real `return [...]`/`raise HTTPException(...)` with `# [1 lines omitted]` + `pass`. The file still **parses** (`pass` is valid Python) so `checkSyntax` and the line-collapse guard both missed it and the broken logic reached the commit. No real source file contains such a banner, so the guard is **zero-false-positive**. Runs in `finalizeRewrite` right after `sanitizeResponse`, for whole-file and fragment rewrites alike. `test/rewrite-validate.test.ts` locks it in. (There is no cheap general guard for a model that silently *invents* logic — a plausible-but-wrong rewrite of a complex function — so model quality still matters: prefer `cerebras/gpt-oss-120b` / `ollama/gpt-oss:120b`; see the model note below.)
 
 Chunk/diff assembly uses **`ASSEMBLY_FINISH` (`stop`)** semantics in `looksTruncated` so legitimate comment-stripping compression is not treated like an unknown cutoff. If full assembly checks fail but the spliced file still **parses** and has balanced brackets, `isSafePartialHumanization` keeps the **partial humanized** worktree instead of reverting to the original (`finishChunkOrDiffRewrite`).
 

@@ -17,7 +17,7 @@ import {
   spliceSlice,
 } from "./diff-hunks.js";
 import { splitIntoChunks } from "./chunk-split.js";
-import { looksIndentBroken, looksStructurallyBroken } from "./rewrite-validate.js";
+import { looksIndentBroken, looksStructurallyBroken, looksStubbed } from "./rewrite-validate.js";
 import { checkSyntax } from "./syntax-guard.js";
 import { resolveLanguage } from "./detector.js";
 import { hasUnbalancedBrackets, balanceRegressed } from "./bracket-balance.js";
@@ -465,6 +465,19 @@ function finalizeRewrite(
 ): { content: string; wasInvalid: boolean; reason?: InvalidReason } {
   const sanitized = sanitizeResponse(raw, original, filePath, finishReason, isFragment);
   if (sanitized.wasInvalid) return sanitized;
+
+  // Stub guard: a response that carries an explicit "N lines omitted" marker is
+  // a truncated body the model stubbed out, not a rewrite. No real source
+  // contains such a banner, so this is a zero-false-positive rejection of the
+  // corruption that `zd/claude-sonnet-4-5` produced on Python (replacing a real
+  // `return [...]`/`raise` with `# [1 lines omitted]` + `pass`) — which parses
+  // and passes every other guard, yet silently breaks the code.
+  if (looksStubbed(sanitized.content)) {
+    console.warn(
+      `[bypasser] ⚠ Rewrite of ${filePath} stubbed out code ("lines omitted" marker) — keeping original.`
+    );
+    return { content: original, wasInvalid: true, reason: "truncated" };
+  }
 
   // `sanitizeResponse` already ran the completeness guard with the
   // finish-reason-aware threshold. Only re-check when the caller requests a

@@ -3,6 +3,40 @@ import { resolveLanguage } from "./detector.js";
 const STRUCTURAL_DROP_RATIO = 0.15;
 
 /**
+ * Markers a model leaves when it *omits* code instead of rewriting it. They
+ * are never valid source in any language, so their mere presence is a
+ * 100%-precision signal that the response is a stub, not a rewrite.
+ *
+ * This is the failure `zd/claude-sonnet-4-5` produced on Python:
+ *
+ *     results = [lead for leads in _leads.values() for lead in leads]
+ *     # [1 lines omitted]
+ *     pass
+ *
+ * The body's real `return [...]` was replaced by the marker + `pass`, so the
+ * function silently returned `None`. Python still parses (`pass` is valid), so
+ * the syntax guard and the line-collapse guard both missed it — a semantic
+ * corruption that reached the commit. These markers catch it deterministically.
+ */
+const OMISSION_MARKERS = [
+  /\[?\s*\d+\s+lines?\s+omitted\s*\]?/i,
+  /\[\s*\.\.\.\s*omitted\s*\]/i,
+  /^\s*#\s*\.\.\.\s*omitted.*$/im,
+  /^\s*\/\/\s*\.\.\.\s*omitted.*$/im,
+  /^\s*\.\.\.\s*omitted.*$/im,
+];
+
+/**
+ * True when `after` carries an explicit "code was omitted here" marker — a stub
+ * masquerading as a rewrite. Independent of language: no real source file
+ * contains a literal "N lines omitted" banner, so a match is always a
+ * corruption, never a false positive.
+ */
+export function looksStubbed(after: string): boolean {
+  return OMISSION_MARKERS.some((re) => re.test(after));
+}
+
+/**
  * Indent unit detection thresholds.
  *
  * A destroyer response flattens indentation (a `const x` inside a function
