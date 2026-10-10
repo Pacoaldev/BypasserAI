@@ -31,6 +31,11 @@
  * (`syntax-guard.ts`) remains the definitive backstop for assembly.
  */
 import type { LanguageProfile } from "./detector.js";
+import {
+  supportsRegexLiterals,
+  looksLikeRegexStart,
+  regexLiteralEnd,
+} from "./mask.js";
 
 /** Bracket pairs the scanner tracks. */
 const CLOSING: Record<string, string> = { "}": "{", ")": "(", "]": "[" };
@@ -56,6 +61,31 @@ function tripleQuoteAt(code: string, i: number): '"' | "'" | null {
 }
 
 /**
+ * True when a rewrite is *more* bracket-unbalanced than the original.
+ *
+ * Why this wrapper exists: the scanner is approximate (`regex-grade, not a
+ * parser`) and cannot model every TSX/JSX construct — a `.tsx` component with
+ * destructured props and JSX blocks is routinely reported "unbalanced" even
+ * though it compiles. If we rejected on the absolute boolean, **every** rewrite
+ * of such a file would be discarded (the original is flagged too, so the model
+ * can never win) and the commit would waste the API call and keep the slop.
+ *
+ * Comparing against the original fixes that: a file the scanner *already*
+ * mis-reads as unbalanced is not rejected for being unbalanced (there is no
+ * signal left to lose), but a rewrite that introduces a NEW imbalance the
+ * original did not have — the actual truncation tell — still is. When the
+ * original is clean, this is exactly `hasUnbalancedBrackets(rewritten)`.
+ */
+export function balanceRegressed(
+  original: string,
+  rewritten: string,
+  profile?: LanguageProfile
+): boolean {
+  if (!hasUnbalancedBrackets(rewritten, profile)) return false;
+  return !hasUnbalancedBrackets(original, profile);
+}
+
+/**
  * Rough bracket-balance check, aware of the language's comments and string
  * delimiters. Brackets inside strings/comments are ignored, so a comment or
  * docstring containing an unpaired bracket never trips it.
@@ -74,6 +104,7 @@ export function hasUnbalancedBrackets(
   const lineComments = profile?.lineComment ?? ["//"];
   const triple = profile ? supportsTripleQuotes(profile) : false;
   const blockComments = profile ? supportsBlockComments(profile) : true;
+  const regexLiterals = profile ? supportsRegexLiterals(profile) : false;
 
   // Python-style f-strings: inside `f"…{expr}…"` the `{…}` is *code*, not text,
   // and it is balanced. We do not model it specially — we simply treat the
@@ -90,6 +121,12 @@ export function hasUnbalancedBrackets(
   let stringDelim: string | null = null;
   /** True while inside a JS/TS template literal (backtick). */
   let inBacktick = false;
+  /**
+   * Bracket-depth at each open `${ … }` template interpolation. A `}` that
+   * returns the stack to the recorded depth closes the interpolation and
+   * resumes string scanning (see the `${` branch below).
+   */
+  const interpDepths: number[] = [];
 
   const isLineCommentStart = (idx: number): number => {
     // Returns the length of the matching line-comment prefix at idx, or 0.
@@ -145,6 +182,18 @@ export function hasUnbalancedBrackets(
         i += 2;
         continue;
       }
+      // ${ … } interpolation: the code inside is real code, so its brackets
+      // MUST be counted. Without this, a template literal like
+      // `…${links.map((l) => `<a …>`).join("")}…` had its inner brackets
+      // swallowed as string text, orphaning the outer `)` and reporting a valid
+      // file as unbalanced. We drop back into normal scanning at `${` and record
+      // the current bracket depth so the matching `}` resumes string scanning.
+      if (ch === "$" && next === "{") {
+        inBacktick = false;
+        interpDepths.push(stack.length);
+        i += 2;
+        continue;
+      }
       if (ch === "`") {
         inBacktick = false;
         i++;
@@ -169,6 +218,22 @@ export function hasUnbalancedBrackets(
       inBlockComment = true;
       i += 2;
       continue;
+    }
+
+    // JS/TS regex literal `/…/flags`. Brackets inside a regex (`/\{\s*$/`,
+    // `/^\s*\{/`, `/\[DONE\]/`) are pattern text, NOT code, so they must not
+    // touch the bracket stack. Skipping this is what made a perfectly valid TS
+    // file with `if (/\{\s*$/.test(acc) …)` report as "unbalanced" and its
+    // rewrite get rejected — a false positive that wasted the API call and
+    // committed the original. Uses the same heuristic as `mask.ts` so the two
+    // scanners cannot disagree on what is a regex.
+    if (regexLiterals && ch === "/" && next !== "/" && next !== "*") {
+      if (looksLikeRegexStart(code, i)) {
+        // `regexLiteralEnd` stops at a newline on an unterminated `/`, so we
+        // never swallow the rest of the file.
+        i = regexLiteralEnd(code, i);
+        continue;
+      }
     }
 
     // Triple-quoted string (Python/Ruby docstrings and multi-line strings).
@@ -199,6 +264,19 @@ export function hasUnbalancedBrackets(
     if (OPENING.has(ch)) {
       stack.push(ch);
     } else if (ch in CLOSING) {
+      // A `}` that brings us back to the depth recorded when `${` opened ends
+      // the template interpolation: resume scanning the backtick string instead
+      // of treating it as a block close.
+      if (
+        ch === "}" &&
+        interpDepths.length > 0 &&
+        stack.length === interpDepths[interpDepths.length - 1]
+      ) {
+        interpDepths.pop();
+        inBacktick = true;
+        i++;
+        continue;
+      }
       if (stack.length === 0 || stack[stack.length - 1] !== CLOSING[ch]) {
         // A closer with no matching opener — structurally broken.
         return true;

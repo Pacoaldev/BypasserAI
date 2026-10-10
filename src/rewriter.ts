@@ -20,7 +20,7 @@ import { splitIntoChunks } from "./chunk-split.js";
 import { looksIndentBroken, looksStructurallyBroken } from "./rewrite-validate.js";
 import { checkSyntax } from "./syntax-guard.js";
 import { resolveLanguage } from "./detector.js";
-import { hasUnbalancedBrackets } from "./bracket-balance.js";
+import { hasUnbalancedBrackets, balanceRegressed } from "./bracket-balance.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -162,8 +162,11 @@ export function looksTruncated(
 ): boolean {
   // A structurally broken response is rejected regardless of finish reason.
   // The balance check is language-aware: `#` comments and Python docstrings
-  // must not be scanned as code (see bracket-balance.ts).
-  if (hasUnbalancedBrackets(rewritten, resolveLanguage(filePath, rewritten))) return true;
+  // must not be scanned as code (see bracket-balance.ts). It fires only when the
+  // rewrite is unbalanced *and the original was not* — otherwise an approximate
+  // scanner's false positive on TSX/JSX (which the original shares) would reject
+  // every rewrite of such a file.
+  if (balanceRegressed(original, rewritten, resolveLanguage(filePath, rewritten))) return true;
 
   const originalLines = original.split("\n").length;
   if (originalLines < TRUNCATION_MIN_LINES) return false;
@@ -212,7 +215,10 @@ export function truncationReason(
   filePath?: string,
   isFragment = false
 ): "unbalanced-brackets" | "line-collapse" | null {
-  if (!isFragment && hasUnbalancedBrackets(rewritten, resolveLanguage(filePath, rewritten)))
+  if (
+    !isFragment &&
+    balanceRegressed(original, rewritten, resolveLanguage(filePath, rewritten))
+  )
     return "unbalanced-brackets";
 
   const originalLines = original.split("\n").length;
@@ -390,7 +396,7 @@ function isSafePartialHumanization(
   filePath: string
 ): boolean {
   if (working.trim() === original.trim()) return false;
-  if (hasUnbalancedBrackets(working, resolveLanguage(filePath, working))) return false;
+  if (balanceRegressed(original, working, resolveLanguage(filePath, working))) return false;
   const syntax = checkSyntax(working, filePath);
   if (syntax.status === "invalid") return false;
   return true;

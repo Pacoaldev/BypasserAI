@@ -86,8 +86,16 @@ function supportsRawStrings(p: LanguageProfile): boolean {
   return p.id === "rust";
 }
 
-/** Languages with JS-style `/…/flags` regex literals. */
-function supportsRegexLiterals(p: LanguageProfile): boolean {
+/**
+ * Languages with JS-style `/…/flags` regex literals.
+ *
+ * Exported so `bracket-balance.ts` can share the exact same notion of "this
+ * language has regex literals" — the balance scanner must ignore brackets
+ * inside `/…/` for the same reason the masker must blank them. Two scanners
+ * disagreeing on that is how a valid TS file with `/\{\s*$/` got reported as
+ * "unbalanced" and its rewrite rejected.
+ */
+export function supportsRegexLiterals(p: LanguageProfile): boolean {
   return p.id === "javascript" || p.id === "typescript";
 }
 
@@ -99,19 +107,58 @@ function supportsRegexLiterals(p: LanguageProfile): boolean {
  * closing `)`, `]`, `}`, the `/` is division; otherwise it opens a regex. This
  * is the standard lexer heuristic and is correct for the cases the detector
  * cares about (strings/comments in real code), not a full JS lexer.
+ *
+ * Exported for `bracket-balance.ts` — see `supportsRegexLiterals`.
  */
-function looksLikeRegexStart(source: string, i: number): boolean {
+export function looksLikeRegexStart(source: string, i: number): boolean {
   let k = i - 1;
   while (k >= 0 && /\s/.test(source[k])) k--;
   if (k < 0) return true; // start of file — a regex
   const prev = source[k];
-  if (/[A-Za-z0-9_$]/.test(prev)) return false; // identifier/number → division
+  if (/[A-Za-z0-9_$]/.test(prev)) {
+    // A keyword like `return` / `typeof` / `case` ends in a letter but is
+    // followed by a *regex*, not a division (`return /re/.test(x)`). Without
+    // this, `/…/` after a keyword was misread as division and its brackets
+    // leaked into the balance scanner — the `return /^(?:\(empresa…$/i` case.
+    let ws = k;
+    while (ws >= 0 && /[A-Za-z0-9_$]/.test(source[ws])) ws--;
+    const word = source.slice(ws + 1, k + 1);
+    if (REGEX_PRECEDING_KEYWORDS.has(word)) return true;
+    return false; // identifier/number → division
+  }
   if (prev === ")" || prev === "]" || prev === "}") return false; // expr end → division
   return true;
 }
 
-/** Consume a `/…/flags` regex literal starting at `i`; return its end index. */
-function regexLiteralEnd(source: string, i: number): number {
+/**
+ * Keywords after which a `/` starts a regex literal (`return /…/`, `typeof /…/`,
+ * `case /…/:`). A letter ends these words, so the identifier heuristic alone
+ * would call the `/` a division.
+ */
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  "return",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "case",
+  "delete",
+  "void",
+  "yield",
+  "await",
+  "new",
+  "do",
+  "else",
+]);
+
+/**
+ * Consume a `/…/flags` regex literal starting at `i`; return its end index.
+ *
+ * Exported alongside `looksLikeRegexStart` so `bracket-balance.ts` can skip
+ * bracket characters inside a regex body (`/\{\s*$/` must not count as an
+ * unbalanced `{`).
+ */
+export function regexLiteralEnd(source: string, i: number): number {
   const n = source.length;
   let j = i + 1;
   let inClass = false; // inside a `[...]` character class, `/` does not close

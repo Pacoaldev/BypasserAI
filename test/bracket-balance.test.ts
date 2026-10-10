@@ -194,11 +194,46 @@ test("isFragment: an unbalanced bracket fragment is NOT rejected", () => {
 });
 
 test("isFragment: default (whole file) still rejects an unbalanced response", () => {
-  const { fragment, rewritten } = pythonSliceUnbalanced();
-  // Same content, but with isFragment=false it IS the whole file → must reject.
-  const result = sanitizeResponse(rewritten, fragment, "src/scanner_app.py", "stop", false);
+  // Whole-file contract: a *balanced* original that comes back truncated (an
+  // unbalanced rewrite) must be rejected — this is the real truncation tell.
+  const originalBalanced = [
+    "def build_parser():",
+    "    parser = argparse.ArgumentParser()",
+    "    parser.add_argument(",
+    '        "--flag", help="do the thing"',
+    "    )",
+    "    return parser",
+  ].join("\n");
+  const { rewritten } = pythonSliceUnbalanced();
+  // Sanity: the original is balanced, the rewrite is not.
+  assert.equal(bal(originalBalanced, "src/scanner_app.py"), false);
+  assert.equal(bal(rewritten, "src/scanner_app.py"), true);
+  const result = sanitizeResponse(rewritten, originalBalanced, "src/scanner_app.py", "stop", false);
   assert.equal(result.wasInvalid, true);
-  assert.equal(result.content, fragment);
+  assert.equal(result.content, originalBalanced);
+});
+
+test("balance is compared to the original: a rewrite is not rejected for an imbalance the original already had", () => {
+  // TSX/JSX is beyond the regex-grade scanner: a valid component can be read as
+  // unbalanced. If the original already carries that (false-positive) imbalance,
+  // a rewrite must NOT be rejected for failing to fix it — otherwise every
+  // rewrite of such a file is discarded (the model can never win) and the commit
+  // wastes the API call on original slop.
+  const jsxOriginal = [
+    "function Card({ title }: { title: string }) {",
+    "  return (",
+    '    <View style={{ marginBottom: 6 }}>',
+    "      {title ? <Text>{title}</Text> : null}",
+    "    </View>",
+    "  );",
+    "}",
+  ].join("\n");
+  // Same structural imbalance as the original (comment stripped) — not worse.
+  const jsxRewritten = jsxOriginal.replace("function Card", "function renderCard");
+  assert.equal(bal(jsxOriginal, "src/Card.tsx"), true);
+  assert.equal(bal(jsxRewritten, "src/Card.tsx"), true);
+  const result = sanitizeResponse(jsxRewritten, jsxOriginal, "src/Card.tsx", "stop", false);
+  assert.equal(result.wasInvalid, false, "a pre-existing (false-positive) imbalance must not reject the rewrite");
 });
 
 test("isFragment: line-collapse half stays active on a fragment", () => {
