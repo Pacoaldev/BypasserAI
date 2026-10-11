@@ -194,6 +194,16 @@ bypasser install   # throws inside those directories
 
 Details: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusions-opt-out-mechanism). `bypasser uninstall` still removes our hook if it was installed by mistake.
 
+### Disable the audit for one repo (`disable: true`)
+
+To keep the hook installed but make it a **complete no-op** in a specific repo — the tool's own source repo, or any repo that ships an equivalent workflow — set `disable` in that project's `.bypasser.json`:
+
+```json
+{ "disable": true }
+```
+
+The audit then scans nothing, rewrites nothing and notifies nothing, and exits `0` so the commit is never blocked or slowed. It short-circuits before the API-key check, so a disabled repo needs no key. `BYPASSER_DISABLE=1` forces it on regardless of the file. `.bypasser.json` is normally gitignored, so this is a per-machine, per-project switch that never leaks into the public source.
+
 ---
 
 ## What happens on commit
@@ -284,6 +294,7 @@ for details, manual install, and uninstall.
 | `contextLines` | `60` | Context around diff hunks |
 | `maxChunkLines` | `450` | Max lines per chunk |
 | `structuralCheck` | `true` | Reject rewrites that drop too many top-level declarations |
+| `disable` | `false` | Make the audit a complete no-op for this repo (hook stays installed) |
 | `notifications` | `auto` | `auto` (notify every outcome) · `important` (only humanized + rewrite failures) · `off` (never) |
 
 **Environment variables** (override file config; preferred for secrets):
@@ -295,6 +306,7 @@ for details, manual install, and uninstall.
 | `BYPASSER_MODEL` | Model |
 | `OPENAI_API_KEY` | Fallback key |
 | `BYPASSER_VERBOSE` | `1` → verbose audit/hook output |
+| `BYPASSER_DISABLE` | `1` → force-disable the audit for this run |
 | `BYPASSER_HOOK_EXCLUDED_REPOS` | Comma-separated repo folder names to block `install` |
 | `BYPASSER_SKILL_LOCALE` | `es` → Spanish humanizer prompt (`SKILL.es.md`); default English |
 | `BYPASSER_NOTIFICATIONS` | `auto` \| `important` \| `off` → override the notification mode |

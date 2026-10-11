@@ -53,6 +53,19 @@ export interface BypasserConfig {
   /** Reject rewrites that drop too many top-level declarations. Default true */
   structuralCheck: boolean;
   /**
+   * When true, the audit is a complete no-op for this repository: nothing is
+   * scanned, scored or rewritten, and no notification fires. Set in the
+   * project's `.bypasser.json`. The point is the hook's own source repo (and
+   * any repo that ships its own equivalent workflow): the pre-commit hook may
+   * still be installed, but it does nothing here. Env `BYPASSER_DISABLE=1`
+   * forces it on regardless of the file.
+   *
+   * `.bypasser.json` is typically gitignored, so this is a per-machine,
+   * per-project switch — it does not leak into the public source or into other
+   * checkouts.
+   */
+  disable: boolean;
+  /**
    * Desktop notification behaviour after an audit.
    *   - `auto` (default): show a toast on Windows / a shell notification on
    *     macOS and Linux for every outcome.
@@ -94,6 +107,7 @@ const DEFAULTS: BypasserConfig = {
   contextLines: 60,
   maxChunkLines: 450,
   structuralCheck: true,
+  disable: false,
   notifications: "auto",
 };
 
@@ -176,6 +190,7 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     typeof fileConfig.structuralCheck === "boolean"
       ? fileConfig.structuralCheck
       : DEFAULTS.structuralCheck;
+  const disabled = parseDisable(fileConfig.disable, process.env.BYPASSER_DISABLE);
   const notifications = parseNotificationMode(
     fileConfig.notifications,
     process.env.BYPASSER_NOTIFICATIONS,
@@ -201,8 +216,24 @@ export function loadConfig(cwd = process.cwd()): BypasserConfig {
     contextLines,
     maxChunkLines,
     structuralCheck,
+    disable: disabled,
     notifications,
   };
+}
+
+/**
+ * `disable: true` in the file, or `BYPASSER_DISABLE=1` in the env, turns the
+ * whole audit into a no-op for the repo. The env var forces it on regardless
+ * of the file so a scripted run can always neutralise the hook.
+ */
+function parseDisable(fileValue: unknown, envValue: string | undefined): boolean {
+  if (envValue !== undefined && isTruthyEnv(envValue)) return true;
+  return typeof fileValue === "boolean" ? fileValue : DEFAULTS.disable;
+}
+
+function isTruthyEnv(v: string): boolean {
+  const t = v.trim().toLowerCase();
+  return t === "1" || t === "true" || t === "yes" || t === "on";
 }
 
 /** `notifications: off` in the file or `BYPASSER_NOTIFICATIONS=off` disables. */

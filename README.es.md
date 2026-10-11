@@ -194,6 +194,16 @@ bypasser install   # falla dentro de esos directorios
 
 Detalle: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusions-opt-out-mechanism). `bypasser uninstall` sigue quitando nuestro hook si se instaló por error.
 
+### Desactivar el audit en un repo (`disable: true`)
+
+Para dejar el hook instalado pero convertirlo en un **no-op total** en un repo concreto — el propio repo fuente de la herramienta, o cualquier repo que tenga un flujo equivalente — pon `disable` en el `.bypasser.json` de ese proyecto:
+
+```json
+{ "disable": true }
+```
+
+El audit entonces no escanea nada, no reescribe nada ni notifica nada, y sale con `0`, así que el commit nunca se bloquea ni se ralentiza. Hace cortocircuito antes de comprobar la API key, así que un repo desactivado no necesita clave. `BYPASSER_DISABLE=1` lo fuerza sin tocar el archivo. El `.bypasser.json` normalmente está en el gitignore, así que es un interruptor por-máquina y por-proyecto que nunca se filtra al código público.
+
 ---
 
 ## Qué pasa al hacer commit
@@ -284,6 +294,7 @@ Luego reinicia OpenCode. Detalles, instalación manual y desinstalación en
 | `contextLines` | `60` | Contexto alrededor de hunks |
 | `maxChunkLines` | `450` | Máximo de líneas por chunk |
 | `structuralCheck` | `true` | Rechaza reescrituras que pierden demasiadas declaraciones top-level |
+| `disable` | `false` | Convierte el audit en no-op total en este repo (el hook sigue instalado) |
 | `notifications` | `auto` | `auto` (notifica siempre) · `important` (solo humanizado + fallos de rewrite) · `off` (nunca) |
 
 **Variables de entorno** (pisan el fichero; recomendadas para secretos):
@@ -298,6 +309,7 @@ Luego reinicia OpenCode. Detalles, instalación manual y desinstalación en
 | `BYPASSER_HOOK_EXCLUDED_REPOS` | Nombres de carpeta de repo separados por comas para bloquear `install` |
 | `BYPASSER_SKILL_LOCALE` | `es` → prompt humanizer en español; por defecto inglés |
 | `BYPASSER_NOTIFICATIONS` | `auto` \| `important` \| `off` → sobrescribe el modo de notificación |
+| `BYPASSER_DISABLE` | `1` → fuerza desactivar el audit en esta ejecución |
 
 ### Elección de modelo (importante)
 

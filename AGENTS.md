@@ -172,8 +172,9 @@ Key fields (see `src/config.ts` `BypasserConfig` for the source of truth):
 - `rewriteScope` (`file` | `diff` | `chunk` | `auto`, default `auto`) — how content is sent to the model.
 - `rewriteFullFileBelowLines` / `contextLines` / `maxChunkLines` — knobs for the `auto` scope decision and diff/chunk slicing.
 - `structuralCheck` (default true) — reject rewrites that drop too many top-level declarations.
+- `disable` (default false) — make the whole audit a **no-op** for this repo: `runAudit` returns an all-zero result before the API-key check, so nothing is scanned, rewritten or notified and the commit is never blocked. Set in the project's (typically gitignored) `.bypasser.json`; `BYPASSER_DISABLE=1` forces it on. This is the switch the hook's **own source repo** uses — the pre-commit hook may be installed there, but it must do nothing.
 
-Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback. `BYPASSER_VERBOSE=1` forces verbose output for `audit`. `BYPASSER_SKILL_LOCALE=es` selects the Spanish humanizer skill file for API rewrites.
+Environment variables override file config: `BYPASSER_API_KEY`, `BYPASSER_BASE_URL`, `BYPASSER_MODEL`. `OPENAI_API_KEY` is used as fallback. `BYPASSER_VERBOSE=1` forces verbose output for `audit`. `BYPASSER_SKILL_LOCALE=es` selects the Spanish humanizer skill file for API rewrites. `BYPASSER_DISABLE=1` forces `disable` on.
 
 `bypasser init` only writes `.bypasser.json` when it does not already exist (guarded by `existsSync`), so it can never clobber an `apiKey` or hand-tuned settings. `bypasser init --force` bypasses the guard and regenerates a **starter** file from `src/cli.ts` (core rewrite knobs; timeout/`maxFileLines` fields may be omitted — runtime still uses `DEFAULTS`). For a complete on-disk template, use `scripts/canonical-bypasser.json`. `init` also appends `.bypasser.log`, `.bypasser.state.json`, `*.bypasser.tmp`, and `*.bak` to `.gitignore`.
 

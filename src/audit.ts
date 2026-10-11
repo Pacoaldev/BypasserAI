@@ -112,6 +112,22 @@ export async function runAudit(opts: {
   const cwd = opts.cwd ?? process.cwd();
   const config = loadConfig(cwd);
 
+  // Disabled for this repo (`.bypasser.json` `disable: true`, or
+  // `BYPASSER_DISABLE=1`). The point is the hook's own source repo and any repo
+  // that ships an equivalent workflow: the pre-commit hook may be installed,
+  // but it must do nothing here — no scan, no rewrite, no notification. Return
+  // an empty, all-green result so the commit is never blocked or slowed.
+  if (config.disable) {
+    return {
+      files: [],
+      totalFiles: 0,
+      rewrittenFiles: 0,
+      errorFiles: 0,
+      rejectedFiles: 0,
+      unresolvedFiles: [],
+    };
+  }
+
   if (!config.apiKey && !opts.dryRun) {
     throw new Error(
       "No API key configured. Set BYPASSER_API_KEY or OPENAI_API_KEY, or add apiKey to .bypasser.json"

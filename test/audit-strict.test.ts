@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectUnresolvedFiles } from "../src/audit.js";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { selectUnresolvedFiles, runAudit } from "../src/audit.js";
 import type { FileAuditResult } from "../src/audit.js";
 
 /**
@@ -61,4 +64,26 @@ test("strict: only the stuck files are selected from a mixed run", () => {
   const stuck = file({ path: "c.ts", score: 0.75, skippedReason: "rewrite rejected (indent)" });
   const selected = selectUnresolvedFiles([clean, done, stuck]);
   assert.deepEqual(selected.map((f) => f.path), ["c.ts"]);
+});
+
+// ---------------------------------------------------------------------------
+// `disable: true` — full no-op. The key guarantee: it short-circuits BEFORE the
+// API-key check, so a disabled repo (the hook's own source, typically with no
+// key) never errors and never blocks the commit.
+// ---------------------------------------------------------------------------
+
+test("runAudit: disable: true is a no-op and does not require an API key", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bypasser-audit-disable-"));
+  try {
+    writeFileSync(join(dir, ".bypasser.json"), JSON.stringify({ disable: true }), "utf8");
+    const res = await runAudit({ cwd: dir });
+    assert.equal(res.totalFiles, 0);
+    assert.equal(res.rewrittenFiles, 0);
+    assert.equal(res.errorFiles, 0);
+    assert.equal(res.rejectedFiles, 0);
+    assert.deepEqual(res.unresolvedFiles, []);
+    assert.deepEqual(res.files, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

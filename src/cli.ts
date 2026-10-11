@@ -116,8 +116,13 @@ async function main() {
 
         if (result.totalFiles === 0) {
           // always print something so the user knows the hook ran
-          if (preCommit) console.log("bypasser-ai: nothing to scan.");
-          else console.log("No eligible staged files.");
+          if (loadConfig(cwd).disable) {
+            console.log("bypasser-ai: disabled for this repository (disable: true).");
+          } else if (preCommit) {
+            console.log("bypasser-ai: nothing to scan.");
+          } else {
+            console.log("No eligible staged files.");
+          }
           return 0;
         }
 
