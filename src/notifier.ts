@@ -1,5 +1,11 @@
 import { spawn } from "child_process";
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  unlinkSync,
+  renameSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import type { NotificationMode } from "./config.js";
@@ -72,6 +78,12 @@ export function notifyWindows(opts: NotifyOptions, deps: NotifyDeps = {}): void 
 
   const { title, message, type = "info" } = opts;
 
+  // A toast with an empty line renders as a stray blank block (or, worse, an
+  // empty card) — the exact "can't read anything" report. Never queue one:
+  // nothing to say means nothing to show. Titles/messages are static strings
+  // today, so this only ever fires on a genuine caller bug.
+  if (String(title).trim() === "" && String(message).trim() === "") return;
+
   try {
     const payload = JSON.stringify({
       title: String(title),
@@ -81,13 +93,40 @@ export function notifyWindows(opts: NotifyOptions, deps: NotifyDeps = {}): void 
       // previous commit whose runner never ran (e.g. crash).
       nonce: Date.now() + ":" + Math.random().toString(36).slice(2, 10),
     });
-    writeFileSync(toastPayloadPath(), payload, "utf8");
+    // Atomic writes: the runner VBScript fires the moment the hook returns, so
+    // a half-written payload (crash / concurrent commit mid-write) must never be
+    // observable. Write to a sibling temp file then rename — rename is atomic on
+    // NTFS, so the runner's `Get-Content` sees either the old file or the whole
+    // new one, never a truncated JSON that parses to empty strings.
+    writeFileAtomic(toastPayloadPath(), payload);
     // Write the PowerShell script that the hook runner will execute
     // (hidden, via WScript.Shell.Run WindowStyle=0). Node never spawns
     // PowerShell itself — see buildLaunch for why.
-    writeFileSync(toastScriptPath(), buildScript(), "utf8");
+    writeFileAtomic(toastScriptPath(), buildScript());
   } catch {
     // never block the commit because of a notification
+  }
+}
+
+/**
+ * Write `content` to `path` atomically (temp file + rename), so a reader never
+ * observes a partial write. Best-effort: falls back to a direct write if the
+ * rename fails (e.g. the temp path is locked), since the important guarantee is
+ * only that a *truncated* file is never the one that gets read.
+ */
+function writeFileAtomic(path: string, content: string): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, content, "utf8");
+    renameSync(tmp, path);
+  } catch {
+    // cleanup the temp and fall back to a plain write
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // ignore
+    }
+    writeFileSync(path, content, "utf8");
   }
 }
 
@@ -194,10 +233,22 @@ $ErrorActionPreference = 'Stop'
 
 # Read the toast payload written by the Node notifier. Reading from a file
 # (rather than a command line) means title/message need no shell escaping.
-$payload = Get-Content -Raw -LiteralPath '${payloadPath}'
+# -Encoding UTF8 is explicit: without it Windows PowerShell 5.1 reads a BOM-less
+# UTF-8 file as the ANSI code page, which mangles non-ASCII text (em-dashes,
+# accents) in the toast.
+$payload = Get-Content -Raw -Encoding UTF8 -LiteralPath '${payloadPath}'
 $o = $payload | ConvertFrom-Json
 $title = [string]$o.title
 $msg = [string]$o.message
+
+# Never show an empty toast: the runner fires the moment the hook returns, so a
+# stale/cleared payload must not produce a blank card the user can't read. If
+# both fields are blank, there is nothing to show — self-clean and exit.
+if ([string]::IsNullOrWhiteSpace($title) -and [string]::IsNullOrWhiteSpace($msg)) {
+  try { Remove-Item -LiteralPath '${payloadPath}' -Force -ErrorAction SilentlyContinue } catch { }
+  try { Remove-Item -LiteralPath '${scriptPath}' -Force -ErrorAction SilentlyContinue } catch { }
+  exit 0
+}
 
 # Primary path: WinRT toast under our own registered AppUserModelID
 # (BypasserAI.Notifier, registered by the installer). The toast persists in

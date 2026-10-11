@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "fs";
+import { existsSync, unlinkSync } from "fs";
 import {
   notifyWindows,
   buildScript,
@@ -44,12 +44,51 @@ test("buildScript: reads title/message from the payload file, never a command li
   // Reading from a file means user-provided text never has to be escaped
   // into a shell command line — no injection surface.
   const script = buildScript();
-  assert.match(script, /Get-Content -Raw -LiteralPath/);
+  assert.match(script, /Get-Content -Raw -Encoding UTF8 -LiteralPath/);
   assert.match(script, /ConvertFrom-Json/);
   assert.match(script, /\$title = \[string\]\$o\.title/);
   assert.match(script, /\$msg = \[string\]\$o\.message/);
   // It self-cleans both temp files so %TEMP% does not accumulate debris.
   assert.match(script, /Remove-Item -LiteralPath/);
+});
+
+test("buildScript: forces -Encoding UTF8 so em-dashes/accents survive", () => {
+  // Windows PowerShell 5.1 reads a BOM-less UTF-8 file as the ANSI code page
+  // without an explicit -Encoding, mangling `—` and accented chars in the toast.
+  const script = buildScript();
+  assert.match(script, /Get-Content -Raw -Encoding UTF8 -LiteralPath/);
+});
+
+test("buildScript: bails out (no toast) when title and message are both blank", () => {
+  // An empty payload must never produce a blank card the user can't read.
+  const script = buildScript();
+  assert.match(script, /IsNullOrWhiteSpace\(\$title\)/);
+  assert.match(script, /IsNullOrWhiteSpace\(\$msg\)/);
+});
+
+test("notifyWindows: writes nothing when title and message are both blank", () => {
+  // Hermetic: clear any payload/script left by a previous run first.
+  clearToastPayload();
+  try {
+    unlinkSync(toastScriptPath());
+  } catch {
+    // nothing to clean
+  }
+  notifyWindows({ title: "   ", message: "" }, { platform: "win32" });
+  // No payload → the runner has nothing to fire a blank toast with.
+  assert.equal(readToastPayload(), null);
+  // And no script either, so a stale script can't render an empty card.
+  assert.equal(existsSync(toastScriptPath()), false);
+  clearToastPayload();
+});
+
+test("notifyWindows: still writes when only one of title/message is blank", () => {
+  clearToastPayload();
+  notifyWindows({ title: "BypasserAI", message: "" }, { platform: "win32" });
+  const p = readToastPayload();
+  assert.ok(p, "a title-only toast is legitimate");
+  assert.equal(p.title, "BypasserAI");
+  clearToastPayload();
 });
 
 test("notifyWindows: no-op on non-Windows platforms", () => {
