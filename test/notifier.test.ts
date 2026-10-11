@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, unlinkSync } from "fs";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+} from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
   notifyWindows,
   buildScript,
@@ -13,6 +19,30 @@ import {
   _resetBurntToastCache,
   _setBurntToastAvailable,
 } from "../src/notifier.js";
+
+// ---------------------------------------------------------------------------
+// Hermetic temp isolation.
+//
+// These tests exercise `notifyWindows`, which writes its toast payload to
+// `os.tmpdir()` by default. On a machine where the CLI is linked globally, the
+// REAL pre-commit runner VBScript reads that same `%TEMP%/bypasser-ai-toast.json`
+// — so a test that leaves a payload behind makes the next commit show the test's
+// dummy text as a real toast (the "BypasserAI: t / m" garbage-toast bug). Worse,
+// `os.tmpdir()` caches its value at process start, so `process.env.TMP = ...`
+// inside a test does NOT redirect it.
+//
+// Fix: every test that writes a toast passes an explicit `tmpDir` pointing at a
+// private scratch dir, and cleans it up. Nothing ever touches the real %TEMP%.
+// ---------------------------------------------------------------------------
+
+function withTmp<T>(fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "bypasser-notify-test-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 test("buildLaunch: is a deliberate no-op — Node never spawns PowerShell", () => {
   // Node used to spawn `cmd.exe /c powershell ...` here. That path either
@@ -66,83 +96,112 @@ test("buildScript: bails out (no toast) when title and message are both blank", 
   assert.match(script, /IsNullOrWhiteSpace\(\$msg\)/);
 });
 
-test("notifyWindows: writes nothing when title and message are both blank", () => {
-  // Hermetic: clear any payload/script left by a previous run first.
-  clearToastPayload();
-  try {
-    unlinkSync(toastScriptPath());
-  } catch {
-    // nothing to clean
-  }
-  notifyWindows({ title: "   ", message: "" }, { platform: "win32" });
-  // No payload → the runner has nothing to fire a blank toast with.
-  assert.equal(readToastPayload(), null);
-  // And no script either, so a stale script can't render an empty card.
-  assert.equal(existsSync(toastScriptPath()), false);
-  clearToastPayload();
-});
-
-test("notifyWindows: still writes when only one of title/message is blank", () => {
-  clearToastPayload();
-  notifyWindows({ title: "BypasserAI", message: "" }, { platform: "win32" });
-  const p = readToastPayload();
-  assert.ok(p, "a title-only toast is legitimate");
-  assert.equal(p.title, "BypasserAI");
-  clearToastPayload();
+test("buildScript: honours an injected payload/script path", () => {
+  const script = buildScript("C:/x/payload.json", "C:/x/script.ps1");
+  assert.match(script, /C:\/x\/payload\.json/);
+  assert.match(script, /C:\/x\/script\.ps1/);
 });
 
 test("notifyWindows: no-op on non-Windows platforms", () => {
-  clearToastPayload();
-  notifyWindows({ title: "t", message: "m" }, { platform: "linux" });
-  // On linux the notifier is a no-op — no payload file should ever appear.
-  assert.equal(existsSync(toastPayloadPath()), false);
+  withTmp((dir) => {
+    notifyWindows({ title: "t", message: "m" }, { platform: "linux", tmpDir: dir });
+    // On linux the notifier is a no-op — no payload file should ever appear.
+    assert.equal(existsSync(toastPayloadPath(dir)), false);
+  });
 });
 
 test("notifyWindows: writes the JSON payload and the PowerShell script", () => {
-  notifyWindows(
-    { title: "BypasserAI", message: "2 files rewritten", type: "warning" },
-    { platform: "win32" }
-  );
+  withTmp((dir) => {
+    notifyWindows(
+      { title: "BypasserAI", message: "2 files rewritten", type: "warning" },
+      { platform: "win32", tmpDir: dir }
+    );
 
-  const payload = readToastPayload();
-  assert.ok(payload, "runner must be able to read the toast payload");
-  assert.equal(payload.title, "BypasserAI");
-  assert.equal(payload.message, "2 files rewritten");
-  assert.equal(payload.type, "warning");
+    const payload = readToastPayload(dir);
+    assert.ok(payload, "runner must be able to read the toast payload");
+    assert.equal(payload.title, "BypasserAI");
+    assert.equal(payload.message, "2 files rewritten");
+    assert.equal(payload.type, "warning");
 
-  // The .ps1 the runner will execute must also exist.
-  assert.equal(existsSync(toastScriptPath()), true);
+    // The .ps1 the runner will execute must also exist.
+    assert.equal(existsSync(toastScriptPath(dir)), true);
 
-  clearToastPayload();
-  assert.equal(readToastPayload(), null);
+    clearToastPayload(dir);
+    assert.equal(readToastPayload(dir), null);
+  });
 });
 
 test("notifyWindows: special characters survive the JSON round-trip verbatim", () => {
   // Because the payload travels as JSON (not a command line), characters
   // that would have broken the old cmd-line encoding must pass through
   // untouched.
-  notifyWindows(
-    { title: "x'); rm -rf /; #", message: "$(evil) `tick` \"quote\"", type: "error" },
-    { platform: "win32" }
-  );
-  const p = readToastPayload();
-  assert.ok(p);
-  assert.equal(p.title, "x'); rm -rf /; #");
-  assert.equal(p.message, "$(evil) `tick` \"quote\"");
-  assert.equal(p.type, "error");
-  clearToastPayload();
+  withTmp((dir) => {
+    notifyWindows(
+      { title: "x'); rm -rf /; #", message: "$(evil) `tick` \"quote\"", type: "error" },
+      { platform: "win32", tmpDir: dir }
+    );
+    const p = readToastPayload(dir);
+    assert.ok(p);
+    assert.equal(p.title, "x'); rm -rf /; #");
+    assert.equal(p.message, "$(evil) `tick` \"quote\"");
+    assert.equal(p.type, "error");
+    clearToastPayload(dir);
+  });
 });
 
 test("notifyWindows: never blocks even if the disk write fails", () => {
-  // Point TMP at a non-existent drive and confirm notifyWindows still
-  // returns rather than throwing.
-  const originalTmp = process.env.TMP;
-  process.env.TMP = "Z:\\_definitely_not_a_real_path_\\x";
-  try {
-    notifyWindows({ title: "t", message: "m" }, { platform: "win32" });
-  } finally {
-    process.env.TMP = originalTmp;
-  }
+  // Point the injected temp dir at a non-existent drive and confirm
+  // notifyWindows still returns rather than throwing.
+  notifyWindows(
+    { title: "t", message: "m" },
+    { platform: "win32", tmpDir: "Z:\\_definitely_not_a_real_path_\\x" }
+  );
   // Reaching here without throwing honours the "never block the commit"
   // contract.
+});
+
+test("notifyWindows: writes nothing when title and message are both blank", () => {
+  withTmp((dir) => {
+    notifyWindows({ title: "   ", message: "" }, { platform: "win32", tmpDir: dir });
+    // No payload → the runner has nothing to fire a blank toast with.
+    assert.equal(readToastPayload(dir), null);
+    // And no script either, so a stale script can't render an empty card.
+    assert.equal(existsSync(toastScriptPath(dir)), false);
+  });
+});
+
+test("notifyWindows: still writes when only one of title/message is blank", () => {
+  withTmp((dir) => {
+    notifyWindows({ title: "BypasserAI", message: "" }, { platform: "win32", tmpDir: dir });
+    const p = readToastPayload(dir);
+    assert.ok(p, "a title-only toast is legitimate");
+    assert.equal(p.title, "BypasserAI");
+    clearToastPayload(dir);
+  });
+});
+
+test("notifyWindows: writes to the injected tmpDir, never the real %TEMP%", () => {
+  // Regression for the "t"/"m" garbage toast: a test must never leave a payload
+  // where the real pre-commit runner would pick it up.
+  const realPayload = toastPayloadPath();
+  const realScript = toastScriptPath();
+  const realPayloadExisted = existsSync(realPayload);
+  const realScriptExisted = existsSync(realScript);
+
+  withTmp((dir) => {
+    notifyWindows(
+      { title: "SHOULD_NOT_ESCAPE", message: "isolated", type: "info" },
+      { platform: "win32", tmpDir: dir }
+    );
+    assert.ok(existsSync(toastPayloadPath(dir)), "payload must land in the injected dir");
+    assert.ok(existsSync(toastScriptPath(dir)), "script must land in the injected dir");
+  });
+
+  // The real system temp must be exactly as we found it — no payload written.
+  if (!realPayloadExisted) {
+    assert.equal(existsSync(realPayload), false, "real %TEMP% payload must not be created");
+  }
+  if (!realScriptExisted) {
+    assert.equal(existsSync(realScript), false, "real %TEMP% script must not be created");
+  }
 });

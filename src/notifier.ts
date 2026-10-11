@@ -35,6 +35,15 @@ export interface NotifyDeps {
   platform?: NodeJS.Platform;
   /** Spawn function, injectable for tests. Defaults to child_process.spawn. */
   spawnFn?: typeof spawn;
+  /**
+   * Directory the toast payload/script are written to. Defaults to
+   * `os.tmpdir()`. Injectable so tests NEVER write into the real system temp:
+   * a test that leaves a payload behind would be picked up by the pre-commit
+   * runner VBS and shown as a real toast (the "t"/"m" garbage-toast bug). Note
+   * `os.tmpdir()` caches the value at process start, so mutating `process.env.TMP`
+   * inside a test does NOT redirect it — only this explicit override does.
+   */
+  tmpDir?: string;
 }
 
 // Well-known AppUserModelID we register at install time. PowerShell's own
@@ -93,16 +102,20 @@ export function notifyWindows(opts: NotifyOptions, deps: NotifyDeps = {}): void 
       // previous commit whose runner never ran (e.g. crash).
       nonce: Date.now() + ":" + Math.random().toString(36).slice(2, 10),
     });
+    // Resolve the paths ONCE from the (possibly injected) temp dir, so a caller
+    // that overrides `tmpDir` (tests) never touches the real system %TEMP%.
+    const payloadPath = toastPayloadPath(deps.tmpDir);
+    const scriptPath = toastScriptPath(deps.tmpDir);
     // Atomic writes: the runner VBScript fires the moment the hook returns, so
     // a half-written payload (crash / concurrent commit mid-write) must never be
     // observable. Write to a sibling temp file then rename — rename is atomic on
     // NTFS, so the runner's `Get-Content` sees either the old file or the whole
     // new one, never a truncated JSON that parses to empty strings.
-    writeFileAtomic(toastPayloadPath(), payload);
+    writeFileAtomic(payloadPath, payload);
     // Write the PowerShell script that the hook runner will execute
     // (hidden, via WScript.Shell.Run WindowStyle=0). Node never spawns
     // PowerShell itself — see buildLaunch for why.
-    writeFileAtomic(toastScriptPath(), buildScript());
+    writeFileAtomic(scriptPath, buildScript(payloadPath, scriptPath));
   } catch {
     // never block the commit because of a notification
   }
@@ -131,13 +144,13 @@ function writeFileAtomic(path: string, content: string): void {
 }
 
 /** Absolute path to the toast payload file the runner reads. */
-export function toastPayloadPath(): string {
-  return join(tmpdir(), "bypasser-ai-toast.json");
+export function toastPayloadPath(tmpDir?: string): string {
+  return join(tmpDir ?? tmpdir(), "bypasser-ai-toast.json");
 }
 
 /** Absolute path to the PowerShell script the runner executes. */
-export function toastScriptPath(): string {
-  return join(tmpdir(), "bypasser-ai-toast.ps1");
+export function toastScriptPath(tmpDir?: string): string {
+  return join(tmpDir ?? tmpdir(), "bypasser-ai-toast.ps1");
 }
 
 /**
@@ -145,9 +158,9 @@ export function toastScriptPath(): string {
  * `null` when the file is missing or unreadable. Exported for the runner
  * VBScript via a side-channel; the hook invokes this from WSH.
  */
-export function readToastPayload(): { title: string; message: string; type: string } | null {
+export function readToastPayload(tmpDir?: string): { title: string; message: string; type: string } | null {
   try {
-    const p = toastPayloadPath();
+    const p = toastPayloadPath(tmpDir);
     if (!existsSync(p)) return null;
     return JSON.parse(readFileSync(p, "utf8"));
   } catch {
@@ -156,9 +169,9 @@ export function readToastPayload(): { title: string; message: string; type: stri
 }
 
 /** Delete the toast payload file after it has been consumed. */
-export function clearToastPayload(): void {
+export function clearToastPayload(tmpDir?: string): void {
   try {
-    const p = toastPayloadPath();
+    const p = toastPayloadPath(tmpDir);
     if (existsSync(p)) unlinkSync(p);
   } catch {
     // best-effort
@@ -222,11 +235,12 @@ export function buildLaunch(_script: string): { cmd: string; args: string[] } {
  *   3. beeps as an audible backstop,
  *   4. deletes both temp files so nothing accumulates in %TEMP%.
  */
-export function buildScript(): string {
+export function buildScript(payloadFile?: string, scriptFile?: string): string {
   // Embed the payload path as a PowerShell single-quoted literal. The path
-  // comes from os.tmpdir() — controlled, never user input — so it is safe.
-  const payloadPath = toastPayloadPath().replace(/'/g, "''");
-  const scriptPath = toastScriptPath().replace(/'/g, "''");
+  // comes from os.tmpdir() (or an injected dir in tests) — controlled, never
+  // user input — so it is safe.
+  const payloadPath = (payloadFile ?? toastPayloadPath()).replace(/'/g, "''");
+  const scriptPath = (scriptFile ?? toastScriptPath()).replace(/'/g, "''");
 
   return `
 $ErrorActionPreference = 'Stop'
