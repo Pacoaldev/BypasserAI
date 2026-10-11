@@ -181,7 +181,23 @@ export function looksTruncated(
  *
  * Used for diff/chunk *fragments*, whose line range is arbitrary and therefore
  * not expected to be bracket-balanced on its own. See `sanitizeResponse`.
+ *
+ * Why the fragment floor is far more permissive than the full-file one: a
+ * fragment is a *window* of the file (the changed hunk plus `contextLines` of
+ * surrounding, already-git-validated code). The model is asked to humanize it
+ * in place, not to preserve its line count — merging a two-line `if` into one,
+ * dropping a narration comment inside the window, or tightening a blank line
+ * all shrink the slice legitimately. Judging that with the 0.75/0.4 full-file
+ * ratios produced false "truncated" rejections on perfectly good hunks, which
+ * then kept the original slop. Fragment truncation is instead caught by the
+ * *line-count conservation* contract enforced by the caller (`rewriteByDiff` /
+ * `rewriteByChunks`): a slice that changes length is rejected before it can
+ * corrupt the splice seam. This function therefore only flags the catastrophic
+ * case — a fragment collapsing to a small fraction of the window — as a cheap
+ * backstop in case that contract is ever bypassed.
  */
+export const FRAGMENT_LINE_RATIO = 0.25;
+
 export function lineCollapseOnly(
   rewritten: string,
   original: string,
@@ -190,8 +206,11 @@ export function lineCollapseOnly(
   const originalLines = original.split("\n").length;
   if (originalLines < TRUNCATION_MIN_LINES) return false;
   const rewrittenLines = rewritten.split("\n").length;
-  const ratio = finishReason === "stop" ? COMPRESSION_LINE_RATIO : TRUNCATION_LINE_RATIO;
-  return rewrittenLines < originalLines * ratio;
+  // Unknown finish reason no longer escalates the fragment floor: for a window
+  // of context lines the ratio signal is inherently noisy, and the caller's
+  // line-count check is the real guard.
+  void finishReason;
+  return rewrittenLines < originalLines * FRAGMENT_LINE_RATIO;
 }
 
 /**
@@ -353,6 +372,31 @@ function stripPathHeader(code: string, filePath: string): string {
   return lines.join("\n");
 }
 
+/**
+ * True when a *fragment* (diff hunk / chunk) response changed the slice's line
+ * count. The fragment contract is absolute: the model must return exactly the
+ * same number of lines it was given, because the caller splices it back into a
+ * fixed line range (`spliceSlice` replaces `startLine..endLine` verbatim). If
+ * the response has even one line more or fewer, the splice shifts every
+ * subsequent line — duplicating or deleting a line at the seam — and the
+ * assembled file stops compiling. Earlier code allowed this and only discovered
+ * the damage later as an "unbalanced brackets after chunk assembly" rejection,
+ * which wasted the API call and kept the original slop; worse, a shifted seam
+ * could still parse and silently corrupt the file. Rejecting a length-changing
+ * fragment up front keeps the original slice, which is always safe.
+ *
+ * A trailing newline difference is not a real line-count change, so it is
+ * normalised away first.
+ */
+export function fragmentLengthChanged(rewritten: string, original: string): boolean {
+  const count = (s: string): number => {
+    const t = s.replace(/\r\n/g, "\n");
+    const trimmed = t.endsWith("\n") ? t.slice(0, -1) : t;
+    return trimmed.split("\n").length;
+  };
+  return count(rewritten) !== count(original);
+}
+
 export type RewriteClient = OpenAI;
 
 export function createRewriteClient(
@@ -465,6 +509,19 @@ function finalizeRewrite(
 ): { content: string; wasInvalid: boolean; reason?: InvalidReason } {
   const sanitized = sanitizeResponse(raw, original, filePath, finishReason, isFragment);
   if (sanitized.wasInvalid) return sanitized;
+
+  // Fragment line-count contract: a diff/chunk slice is spliced back into a
+  // FIXED line range, so a response with a different line count shifts the whole
+  // file at the seam (see fragmentLengthChanged). Reject it and keep the
+  // original slice. Full-file rewrites are exempt: they replace the file
+  // wholesale, so their length may legitimately change.
+  if (isFragment && fragmentLengthChanged(sanitized.content, original)) {
+    console.warn(
+      `[bypasser] ⚠ Fragment of ${filePath} changed line count ` +
+        `(${sanitized.content.split("\n").length} vs ${original.split("\n").length}) — keeping original slice.`
+    );
+    return { content: original, wasInvalid: true, reason: "truncated" };
+  }
 
   // Stub guard: a response that carries an explicit "N lines omitted" marker is
   // a truncated body the model stubbed out, not a rewrite. No real source
@@ -696,7 +753,25 @@ async function rewriteByDiff(
       continue;
     }
     if (newSlice.trim() !== sliceOriginal.trim()) {
-      working = spliceSlice(working, startLine, endLine, newSlice);
+      const next = spliceSlice(working, startLine, endLine, newSlice);
+      // Invariant: `startLine`/`endLine` are derived from the ORIGINAL diff line
+      // numbers, but every splice mutates `working`. They stay correct only
+      // while the splice is line-count-neutral — which the fragment contract
+      // (fragmentLengthChanged) guarantees. If this ever fails, splicing at the
+      // next hunk's stale offset would corrupt the file; abort the whole diff
+      // rewrite and keep the original instead.
+      if (next.split("\n").length !== working.split("\n").length) {
+        console.warn(
+          `[bypasser] ⚠ Hunk ${startLine}-${endLine} in ${filePath} shifted the file — aborting diff rewrite, keeping original.`
+        );
+        return {
+          rewritten: content,
+          changed: false,
+          sanitizerWarning: true,
+          invalidReason: "truncated",
+        };
+      }
+      working = next;
       anyChange = true;
     }
   }
@@ -752,7 +827,22 @@ async function rewriteByChunksInner(
       continue;
     }
     if (newSlice.trim() !== sliceOriginal.trim()) {
-      working = spliceSlice(working, chunk.startLine, chunk.endLine, newSlice);
+      const next = spliceSlice(working, chunk.startLine, chunk.endLine, newSlice);
+      // Same invariant as rewriteByDiff: chunk offsets are computed once from
+      // `content`, so every splice must stay line-count-neutral or the next
+      // chunk lands at a stale offset. Abort to the original on violation.
+      if (next.split("\n").length !== working.split("\n").length) {
+        console.warn(
+          `[bypasser] ⚠ Chunk ${chunk.startLine}-${chunk.endLine} in ${filePath} shifted the file — aborting chunk rewrite, keeping original.`
+        );
+        return {
+          rewritten: content,
+          changed: false,
+          sanitizerWarning: true,
+          invalidReason: "truncated",
+        };
+      }
+      working = next;
       anyChange = true;
     }
   }

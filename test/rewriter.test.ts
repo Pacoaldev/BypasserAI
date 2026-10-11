@@ -5,6 +5,8 @@ import {
   looksTruncated,
   truncationReason,
   rewriteFile,
+  lineCollapseOnly,
+  fragmentLengthChanged,
 } from "../src/rewriter.js";
 import type { RewriteClient } from "../src/rewriter.js";
 
@@ -371,4 +373,114 @@ test("rewriteFile: accepts a well-indented rewrite", async () => {
   });
   assert.equal(res.changed, true);
   assert.equal(res.rewritten, wellIndented);
+});
+
+// ---------------------------------------------------------------------------
+// Fragment line-count contract (the diff-mode seam corruption).
+//
+// Incident: in `diff` scope (used by MinionJobker et al.) the hook sliced a hunk
+// plus context, asked the model to humanize it, and spliced the response back
+// into a FIXED line range. When the model returned a fragment with one line
+// more or fewer — merging an `if`, dropping a narration comment — the splice
+// shifted every subsequent line, duplicating or deleting a line at the seam.
+// The assembled file then failed to compile (or, worse, parsed but was subtly
+// wrong), which the user saw as "the hook keeps truncating and makes my changes
+// invalid". These tests pin the contract: a fragment MUST preserve its line
+// count, and a length-changing one is rejected with the original kept.
+// ---------------------------------------------------------------------------
+
+test("fragmentLengthChanged: same line count is preserved (trailing newline tolerated)", () => {
+  const original = "a\nb\nc";
+  assert.equal(fragmentLengthChanged("a\nb\nc", original), false);
+  assert.equal(fragmentLengthChanged("a\nb\nc\n", original), false);
+  assert.equal(fragmentLengthChanged("x\ny\nz", original), false);
+});
+
+test("fragmentLengthChanged: a dropped or added line is caught", () => {
+  const original = "a\nb\nc";
+  assert.equal(fragmentLengthChanged("a\nc", original), true);
+  assert.equal(fragmentLengthChanged("a\nb\nc\nd", original), true);
+});
+
+test("rewriteFile (diff): a line-count-changing fragment keeps the original", async () => {
+  // A 20-line file; the diff touches the middle. The model returns a fragment
+  // with one line FEWER (it merged two lines), which would shift the seam.
+  const original = [
+    "export function a() {",
+    "  return 1;",
+    "}",
+    "export function b() {",
+    "  const x = 2;",
+    "  const y = 3;",
+    "  return x + y;",
+    "}",
+    "export function c() {",
+    "  return 4;",
+    "}",
+    "export function d() {",
+    "  return 5;",
+    "}",
+    "export function e() {",
+    "  return 6;",
+    "}",
+    "export function f() {",
+    "  return 7;",
+    "}",
+  ].join("\n");
+  // Model response: same slice but with one line removed.
+  const shortFragment = [
+    "export function b() {",
+    "  const x = 2;",
+    "  if (x) {",
+    "    return x;",
+    "  }",
+    "  return 8;",
+    "}",
+    "export function c() {",
+    "  return 4;",
+    "}",
+    "export function d() {",
+    "  return 5;",
+    "}",
+    "export function e() {",
+    "  return 6;",
+    "}",
+    "export function f() {",
+    "  return 7;",
+    "}",
+  ].join("\n");
+  const diff = [
+    "diff --git a/src/x.ts b/src/x.ts",
+    "--- a/src/x.ts",
+    "+++ b/src/x.ts",
+    "@@ -4,4 +4,3 @@",
+    " export function b() {",
+    "-  return x + y;",
+    "+  return 8;",
+    " }",
+  ].join("\n");
+  const res = await rewriteFile("src/x.ts", original, configStub, {
+    client: mockClient([shortFragment]),
+    scope: "diff",
+    diff,
+  });
+  // The length-changing fragment must not be spliced; the file is unchanged.
+  assert.equal(res.rewritten, original, "original must be kept verbatim");
+  assert.equal(res.changed, false);
+});
+
+test("lineCollapseOnly: a fragment shrinking within the window is not flagged", () => {
+  // A 40-line window the model tightened to 30 lines is legitimate (the
+  // line-count contract handles correctness); the fragment floor must not
+  // reject it as 'truncated'.
+  const original = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+  const tightened = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+  assert.equal(lineCollapseOnly(tightened, original, "stop"), false);
+  assert.equal(lineCollapseOnly(tightened, original), false);
+});
+
+test("lineCollapseOnly: a fragment collapsing to a small fraction is still flagged", () => {
+  const original = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+  const tiny = "line 0\nline 1\nline 2\nline 3\nline 4";
+  assert.equal(lineCollapseOnly(tiny, original, "stop"), true);
 });
