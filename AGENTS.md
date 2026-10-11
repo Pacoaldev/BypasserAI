@@ -68,11 +68,12 @@ npm run format     # prettier
 `dist/` is **gitignored** (not versioned); the CLI a project actually executes is `dist/cli.js`. When the CLI is linked globally (`npm link`, or a junction on Windows pointing `npm/node_modules/bypasser-ai` → this repo), **every project that invokes `bypasser` runs this repo's local `dist/`**. Consequences:
 
 - Editing `src/*.ts` does **nothing** for any project until `npm run build` regenerates `dist/`. A stale `dist/` means the hook runs old logic everywhere.
+- `package.json` has a **`prepare` script (`npm run build`)**, which npm runs automatically after `npm install`. So a fresh clone + `npm install` builds `dist/` without a manual step. It does **not** cover editing `src/` in an already-installed checkout — you still rebuild by hand (or `npm install` again).
 - `git clone` + point the junction/hook at the repo **without** building ⇒ stale `dist/` (the classic "I fixed it but it still breaks" trap).
 - Shipping via the published tarball is fine: `package.json` → `files: ["dist", …]` bundles the built output.
 - CI (`.github/workflows/ci.yml`) runs `npm run build` after lint/typecheck/test, so a build that would fail is caught pre-merge.
 
-**Rule of thumb:** change `src/` → `npm run build` → (optionally) `npm test`. Never hand-edit `dist/`.
+**Rule of thumb:** change `src/` → `npm run build` → (optionally) `npm test`. Never hand-edit `dist/`. A stale `dist/` is the usual cause of "the hook still misbehaves after I fixed it" — e.g. an old notifier writing a toast script without the `-Encoding UTF8` / empty-guard fixes.
 
 ---
 
