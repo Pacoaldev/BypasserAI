@@ -192,6 +192,8 @@ export BYPASSER_HOOK_EXCLUDED_REPOS="mi-repo,monolito-legacy"
 bypasser install   # falla dentro de esos directorios
 ```
 
+Si el repo usa husky, lefthook, pre-commit.com o cualquier cosa que ponga `core.hooksPath` en un directorio distinto a `.git/hooks`, `bypasser install` **falla** en vez de escribir en silencio un archivo que git nunca va a ejecutar. Añade una línea `bypasser audit --pre-commit` al flujo pre-commit existente, o quita `core.hooksPath` y vuelve a instalar. `bypasser uninstall` sigue limpiando un hook legacy de bypasser en `.git/hooks` aunque `core.hooksPath` esté definido — nunca toca el directorio de hooks ajeno.
+
 Detalle: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusions-opt-out-mechanism). `bypasser uninstall` sigue quitando nuestro hook si se instaló por error.
 
 ### Desactivar el audit en un repo (`disable: true`)

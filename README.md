@@ -192,6 +192,8 @@ export BYPASSER_HOOK_EXCLUDED_REPOS="my-repo,legacy-monolith"
 bypasser install   # throws inside those directories
 ```
 
+If the repo uses husky, lefthook, pre-commit.com, or anything else that sets `core.hooksPath` to a directory other than `.git/hooks`, `bypasser install` **refuses** instead of silently writing a file git will never execute. Add a `bypasser audit --pre-commit` line to the existing pre-commit workflow, or unset `core.hooksPath` and re-run install. `bypasser uninstall` still cleans a legacy bypasser hook from `.git/hooks` even when `core.hooksPath` is set — it never touches the foreign hooks directory.
+
 Details: [AGENTS.md → Hook install exclusions](AGENTS.md#hook-install-exclusions-opt-out-mechanism). `bypasser uninstall` still removes our hook if it was installed by mistake.
 
 ### Disable the audit for one repo (`disable: true`)
