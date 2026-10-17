@@ -6,7 +6,7 @@ import {
   renameSync,
   copyFileSync,
 } from "fs";
-import { resolve } from "path";
+import { isAbsolute, resolve } from "path";
 import { BUILT_IN_IGNORE } from "./config.js";
 import type { BypasserConfig } from "./config.js";
 import {
@@ -98,6 +98,33 @@ export function getTrackedFiles(cwd: string): string[] | null {
   return [...tracked.split("\n"), ...untracked.split("\n")]
     .map((f) => f.trim())
     .filter((f) => f.length > 0);
+}
+
+/**
+ * Effective git hooks directory for `cwd`, honoring `core.hooksPath`.
+ *
+ * Asks git itself (`rev-parse --git-path hooks`, no scope flag) so git's
+ * precedence applies: an unset `core.hooksPath` yields `.git/hooks`, a
+ * relative value is resolved against the repo root, an absolute value is
+ * used as-is. The result is always an absolute path so the caller can
+ * compare it against `resolve(cwd, ".git", "hooks")` and decide whether
+ * someone else (husky, lefthook, pre-commit.com, …) owns the hooks dir.
+ *
+ * Returns `null` when git can't be queried (not a repo, git missing) so
+ * the caller falls back to its own `.git/hooks` lookup instead of lying
+ * about a managed hooks directory.
+ */
+export function getEffectiveHooksDir(cwd: string): string | null {
+  const raw = gitOrNull(["rev-parse", "--git-path", "hooks"], cwd);
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (isAbsolute(trimmed)) return trimmed;
+  // Relative — git resolves it against the worktree root, not cwd, so a
+  // subdirectory caller would otherwise get a wrong absolute path.
+  const root = gitOrNull(["rev-parse", "--show-toplevel"], cwd);
+  if (root === null) return null;
+  return resolve(root.trim(), trimmed);
 }
 
 export function getStagedFiles(

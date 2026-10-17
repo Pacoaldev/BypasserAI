@@ -7,6 +7,7 @@ import {
 } from "fs";
 import { resolve, basename } from "path";
 import { spawnSync } from "child_process";
+import { getEffectiveHooksDir } from "./git.js";
 
 const HOOK_MARKER = "# bypasser-ai";
 
@@ -142,7 +143,35 @@ WScript.Quit 0
 export function install(cwd = process.cwd()): void {
   assertHookInstallAllowed(cwd);
 
-  const hookDir = resolve(cwd, ".git", "hooks");
+  // Resolve the hooks dir git will actually use, honoring core.hooksPath.
+  // Writing to .git/hooks while someone else (husky, lefthook, …) owns the
+  // hooks directory is a silent no-op — git would never run our script.
+  const legacyDefault = resolve(cwd, ".git", "hooks");
+  const effectiveDir = getEffectiveHooksDir(cwd);
+  const hookDir = effectiveDir ?? legacyDefault;
+
+  if (effectiveDir !== null && effectiveDir !== legacyDefault) {
+    // Git is configured to use a different hooks dir. Refuse instead of
+    // silently dropping a file git will never execute. Skip the worktree
+    // corner case (linked worktrees resolve to a different hooks path even
+    // without core.hooksPath): if the legacy .git/hooks doesn't exist, this
+    // caller probably isn't a normal repo root and the old "not a git
+    // repository" error is the right message.
+    if (!existsSync(legacyDefault)) {
+      throw new Error(
+        "No .git/hooks directory found. Is this a git repository?"
+      );
+    }
+    throw new Error(
+      `Cannot install bypasser-ai hook: this repository has core.hooksPath ` +
+        `set to "${effectiveDir}", so git will not run a pre-commit hook ` +
+        `placed in ${legacyDefault}. Add a \`bypasser audit --pre-commit\` ` +
+        `invocation to the existing pre-commit workflow at ` +
+        `"${effectiveDir}", or unset core.hooksPath. See README "Opt out of ` +
+        `the hook".`
+    );
+  }
+
   if (!existsSync(hookDir)) {
     throw new Error(
       "No .git/hooks directory found. Is this a git repository?"
