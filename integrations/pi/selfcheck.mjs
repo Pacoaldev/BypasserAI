@@ -267,11 +267,15 @@ try {
       seen.add(component);
       try {
         if ((component.render(50) ?? []).join("\n").includes("BypasserAI")) total += 1;
-      } catch {}
+      } catch (_err) {
+        void _err;
+      }
       if (typeof component[LAYOUT_NODE] === "function") {
         try {
           total += countPanels(component[LAYOUT_NODE](), seen);
-        } catch {}
+        } catch (_err) {
+          void _err;
+        }
       }
     }
     return total;
