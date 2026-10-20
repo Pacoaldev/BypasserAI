@@ -47,8 +47,8 @@ It is **language-agnostic** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, and m
 | | |
 |---|---|
 | **Free detection** | Heuristic scorer runs locally on every commit; no tokens burned on clean files. |
-| **Smart rewrite scope** | Small files → full file; large files → diff hunks or declaration chunks (`rewriteScope: auto`). |
-| **Safety first** | Truncation, indent, structure, and syntax guards; atomic restage with `.bak` rollback — originals win on doubt. |
+| **Smart rewrite scope** | Small files → full file; large files → diff hunks or declaration chunks (`rewriteScope: auto`). Hunks closer than `contextLines` are merged into a single API call, so overlapping context windows never re-send already-rewritten lines. |
+| **Safety first** | Truncation, indent, structure, and syntax guards; atomic restage with `.bak` rollback — originals win on doubt. Fragment rejections surface via `sanitizerWarning` so `bypasser stats` and `--strict` see them. |
 | **Parallel rewrites** | Configurable concurrency across staged files (`rewriteConcurrency`). |
 | **Optional notifications** | Native toast on Windows, shell notify on macOS/Linux; disable with `notifications`. |
 | **Any OpenAI-compatible API** | OpenAI, Groq, OpenRouter, Ollama, LM Studio, local proxies, etc. |

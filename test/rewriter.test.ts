@@ -6,7 +6,6 @@ import {
   truncationReason,
   rewriteFile,
   lineCollapseOnly,
-  fragmentLengthChanged,
 } from "../src/rewriter.js";
 import type { RewriteClient } from "../src/rewriter.js";
 
@@ -376,35 +375,24 @@ test("rewriteFile: accepts a well-indented rewrite", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fragment line-count contract (the diff-mode seam corruption).
+// Fragment splicing: no line-count contract.
 //
-// Incident: in `diff` scope (used by MinionJobker et al.) the hook sliced a hunk
-// plus context, asked the model to humanize it, and spliced the response back
-// into a FIXED line range. When the model returned a fragment with one line
-// more or fewer — merging an `if`, dropping a narration comment — the splice
-// shifted every subsequent line, duplicating or deleting a line at the seam.
-// The assembled file then failed to compile (or, worse, parsed but was subtly
-// wrong), which the user saw as "the hook keeps truncating and makes my changes
-// invalid". These tests pin the contract: a fragment MUST preserve its line
-// count, and a length-changing one is rejected with the original kept.
+// Ranges are processed from the bottom of the file upward, so a length-changing
+// fragment only shifts the content below it — content that is already
+// finalized and will never be read again. All pending ranges above keep their
+// original line numbers. That's why no line-count guard is needed: the
+// humanizer is expected to drop narration comments / terse docblocks, which
+// changes the line count legitimately every single time.
+//
+// The real safety nets (`looksTruncated`, `balanceRegressed`, `looksIndentBroken`,
+// `looksStructurallyBroken`, `looksStubbed`, `checkSyntax`) run later on the
+// assembled file and catch the actual corruption.
 // ---------------------------------------------------------------------------
 
-test("fragmentLengthChanged: same line count is preserved (trailing newline tolerated)", () => {
-  const original = "a\nb\nc";
-  assert.equal(fragmentLengthChanged("a\nb\nc", original), false);
-  assert.equal(fragmentLengthChanged("a\nb\nc\n", original), false);
-  assert.equal(fragmentLengthChanged("x\ny\nz", original), false);
-});
-
-test("fragmentLengthChanged: a dropped or added line is caught", () => {
-  const original = "a\nb\nc";
-  assert.equal(fragmentLengthChanged("a\nc", original), true);
-  assert.equal(fragmentLengthChanged("a\nb\nc\nd", original), true);
-});
-
-test("rewriteFile (diff): a line-count-changing fragment keeps the original", async () => {
+test("rewriteFile (diff): a line-count-changing fragment IS spliced", async () => {
   // A 20-line file; the diff touches the middle. The model returns a fragment
-  // with one line FEWER (it merged two lines), which would shift the seam.
+  // with one line FEWER (it merged two lines). With bottom-up splicing, the
+  // seam shift is safe and the fragment lands in place.
   const original = [
     "export function a() {",
     "  return 1;",
@@ -427,13 +415,16 @@ test("rewriteFile (diff): a line-count-changing fragment keeps the original", as
     "  return 7;",
     "}",
   ].join("\n");
-  // Model response: same slice but with one line removed.
+  // Model response: same slice but tighter (it dropped the `const y = 3`
+  // declaration and folded `x + y` into a literal `8`). Line count drops by
+  // 2; the splice is safe because the splice range sits at the bottom of the
+  // pending list, so content below never shifts anything above it.
   const shortFragment = [
+    "export function a() {",
+    "  return 1;",
+    "}",
     "export function b() {",
     "  const x = 2;",
-    "  if (x) {",
-    "    return x;",
-    "  }",
     "  return 8;",
     "}",
     "export function c() {",
@@ -464,15 +455,85 @@ test("rewriteFile (diff): a line-count-changing fragment keeps the original", as
     scope: "diff",
     diff,
   });
-  // The length-changing fragment must not be spliced; the file is unchanged.
-  assert.equal(res.rewritten, original, "original must be kept verbatim");
-  assert.equal(res.changed, false);
+  // The humanized fragment is spliced into the file at the designated range.
+  assert.equal(res.changed, true, "length-changing fragment must be accepted (bottom-up splice)");
+  assert.ok(!res.rewritten!.includes("return x + y;"), "old slop line is gone");
+  assert.ok(res.rewritten!.includes("return 8;"), "model's tightened form is in the file");
+  // The file lost exactly the amount the fragment lost (19 vs 20 lines).
+  assert.equal(res.rewritten!.split("\n").length, shortFragment.split("\n").length);
+});
+
+test("rewriteFile (diff): a severely-collapsed fragment is still rejected", async () => {
+  // Legit tightening is accepted, but a fragment that collapses to a sliver of
+  // its window is still "truncated" even on a clean stop.
+  const original = Array.from({ length: 40 }, (_, i) => {
+    return i % 2 === 0
+      ? `export function f${i}() {`
+      : `  return ${i};`;
+  }).join("\n");
+  // Model drops 35 of the 40 lines. That's a 12% survival rate — clearly a
+  // partial/corrupted fragment even if it happens to end on a clean boundary.
+  const tiny = original.split("\n").slice(0, 5).join("\n");
+  const diff = "@@ -1,5 +1,1 @@\n-export function f0() {\n+  // compacted\n export function f2() {\n";
+  const res = await rewriteFile("src/x.ts", original, configStub, {
+    client: mockClient([tiny]),
+    scope: "diff",
+    diff,
+  });
+  // The catastrophic-collapse floor (`FRAGMENT_LINE_RATIO`, 0.25) still
+  // fires — we do not accept an almost-empty fragment as a rewrite.
+  assert.equal(res.rewritten, original, "collapsed fragment must not replace the slice");
+  assert.equal(res.changed, false, "a rejected fragment leaves the file untouched");
+  assert.equal(res.sanitizerWarning ?? false, true, "collapse floor must flag the fragment");
+});
+
+test("rewriteFile (diff): hunks closer than contextLines cost one call, not two", async () => {
+  // Two hunks 12 lines apart in a 60-line file. With a fixed small merge gap they
+  // stay separate, their context windows overlap, and the second call re-sends
+  // the first call's already-rewritten text as context before overwriting it.
+  // Merging on `contextLines` (configStub uses 20) collapses them to one range.
+  const original = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
+  const diff = [
+    "@@ -1,4 +1,4 @@",
+    "-line 1",
+    "+line ONE",
+    " line 2",
+    " line 3",
+    "@@ -10,4 +10,4 @@",
+    "-line 10",
+    "+line TEN",
+    " line 11",
+    " line 12",
+  ].join("\n");
+
+  let calls = 0;
+  const counting = {
+    chat: {
+      completions: {
+        create: async () => {
+          calls++;
+          return {
+            choices: [
+              { message: { content: original }, finish_reason: "stop" },
+            ],
+          };
+        },
+      },
+    },
+  } as unknown as RewriteClient;
+
+  await rewriteFile("src/x.ts", original, configStub, {
+    client: counting,
+    scope: "diff",
+    diff,
+  });
+  assert.equal(calls, 1, "overlapping hunk windows must merge into a single call");
 });
 
 test("lineCollapseOnly: a fragment shrinking within the window is not flagged", () => {
-  // A 40-line window the model tightened to 30 lines is legitimate (the
-  // line-count contract handles correctness); the fragment floor must not
-  // reject it as 'truncated'.
+  // A 40-line window the model tightened to 30 lines does not hit the fragment
+  // floor (0.25). Correctness of the splice is handled by bottom-up order,
+  // not by a line-count check.
   const original = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
   const tightened = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
   assert.equal(lineCollapseOnly(tightened, original, "stop"), false);

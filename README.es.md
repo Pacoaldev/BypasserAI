@@ -47,8 +47,8 @@ Es **agnóstico al lenguaje** (JS/TS, Python, Go, Rust, Java, C#, PHP, Ruby, etc
 | | |
 |---|---|
 | **Detección gratis** | El scorer heurístico corre en local en cada commit; no gastas tokens en archivos limpios. |
-| **Scope inteligente** | Archivos pequeños → archivo completo; grandes → hunks del diff o trozos por declaraciones (`rewriteScope: auto`). |
-| **Seguridad primero** | Guardas de truncado, indentación, estructura y sintaxis; restage atómico con rollback `.bak` — ante la duda gana el original. |
+| **Scope inteligente** | Archivos pequeños → archivo completo; grandes → hunks del diff o trozos por declaraciones (`rewriteScope: auto`). Hunks más cercanos que `contextLines` se fusionan en una sola llamada API, así las ventanas de contexto superpuestas nunca reenvían líneas ya reescritas. |
+| **Seguridad primero** | Guardas de truncado, indentación, estructura y sintaxis; restage atómico con rollback `.bak` — ante la duda gana el original. Rechazos de fragmento se exponen vía `sanitizerWarning` para que `bypasser stats` y `--strict` los vean. |
 | **Reescrituras en paralelo** | Concurrencia configurable entre archivos (`rewriteConcurrency`). |
 | **Notificaciones opcionales** | Aviso de escritorio tras cada commit (toast nativo en Windows; `notify-send`/`osascript` en Linux/macOS); desactivable con `notifications`. |
 | **Cualquier API OpenAI-compatible** | OpenAI, Groq, OpenRouter, Ollama, LM Studio, proxies locales, etc. |

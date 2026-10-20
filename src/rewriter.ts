@@ -372,31 +372,6 @@ function stripPathHeader(code: string, filePath: string): string {
   return lines.join("\n");
 }
 
-/**
- * True when a *fragment* (diff hunk / chunk) response changed the slice's line
- * count. The fragment contract is absolute: the model must return exactly the
- * same number of lines it was given, because the caller splices it back into a
- * fixed line range (`spliceSlice` replaces `startLine..endLine` verbatim). If
- * the response has even one line more or fewer, the splice shifts every
- * subsequent line — duplicating or deleting a line at the seam — and the
- * assembled file stops compiling. Earlier code allowed this and only discovered
- * the damage later as an "unbalanced brackets after chunk assembly" rejection,
- * which wasted the API call and kept the original slop; worse, a shifted seam
- * could still parse and silently corrupt the file. Rejecting a length-changing
- * fragment up front keeps the original slice, which is always safe.
- *
- * A trailing newline difference is not a real line-count change, so it is
- * normalised away first.
- */
-export function fragmentLengthChanged(rewritten: string, original: string): boolean {
-  const count = (s: string): number => {
-    const t = s.replace(/\r\n/g, "\n");
-    const trimmed = t.endsWith("\n") ? t.slice(0, -1) : t;
-    return trimmed.split("\n").length;
-  };
-  return count(rewritten) !== count(original);
-}
-
 export type RewriteClient = OpenAI;
 
 export function createRewriteClient(
@@ -510,18 +485,12 @@ function finalizeRewrite(
   const sanitized = sanitizeResponse(raw, original, filePath, finishReason, isFragment);
   if (sanitized.wasInvalid) return sanitized;
 
-  // Fragment line-count contract: a diff/chunk slice is spliced back into a
-  // FIXED line range, so a response with a different line count shifts the whole
-  // file at the seam (see fragmentLengthChanged). Reject it and keep the
-  // original slice. Full-file rewrites are exempt: they replace the file
-  // wholesale, so their length may legitimately change.
-  if (isFragment && fragmentLengthChanged(sanitized.content, original)) {
-    console.warn(
-      `[bypasser] ⚠ Fragment of ${filePath} changed line count ` +
-        `(${sanitized.content.split("\n").length} vs ${original.split("\n").length}) — keeping original slice.`
-    );
-    return { content: original, wasInvalid: true, reason: "truncated" };
-  }
+  // No fragment line-count contract: callers splice ranges bottom-up (highest
+  // line number first), so a slice that legitimately changes length — the model
+  // dropping a narration comment or tightening a two-line `if` — only shifts the
+  // content below it, which is already finalized and never read again. Pending
+  // ranges above keep their original line numbers. The assembled file is still
+  // bracket/indent/syntax/structural checked in `validateAssembledFile`.
 
   // Stub guard: a response that carries an explicit "N lines omitted" marker is
   // a truncated body the model stubbed out, not a rewrite. No real source
@@ -613,7 +582,8 @@ function finishChunkOrDiffRewrite(
   filePath: string,
   config: BypasserConfig,
   anyChange: boolean,
-  minLineRatio: number
+  minLineRatio: number,
+  rejectedRanges = 0
 ): RewriteResult {
   const whole = validateAssembledFile(content, working, filePath, config, minLineRatio);
   if (!whole.wasInvalid) {
@@ -621,6 +591,10 @@ function finishChunkOrDiffRewrite(
       rewritten: whole.content,
       changed: anyChange && whole.content.trim() !== content.trim(),
       hash: anyChange ? contentHash(whole.content) : contentHash(content),
+      // Ranges the guards rejected left AI slop in the file. Without this the
+      // file reaches the commit looking identical to "there was nothing to
+      // rewrite", so `bypasser stats` and `--strict` never see the rejection.
+      sanitizerWarning: rejectedRanges > 0 || undefined,
     };
   }
 
@@ -709,15 +683,24 @@ async function rewriteByDiff(
   diff: string,
   config: BypasserConfig
 ): Promise<RewriteResult> {
-  const ranges = mergeHunkRanges(parseHunkRanges(diff), 8).sort(
-    (a, b) => b.newStart - a.newStart
-  );
+  // Merge hunks closer than `contextLines`, not by a fixed small gap. Each
+  // range's model window is `[newStart - contextLines, newEnd + contextLines]`,
+  // so two ranges only 30 lines apart would produce windows overlapping by
+  // ~90 lines: the second call re-sends already-rewritten text as its context
+  // and then overwrites the first call's result. Merging collapses that pair
+  // into one call over one range, which also keeps every window disjoint and
+  // therefore keeps the bottom-up splice below reading untouched lines.
+  const ranges = mergeHunkRanges(
+    parseHunkRanges(diff),
+    Math.max(8, config.contextLines)
+  ).sort((a, b) => b.newStart - a.newStart);
   if (ranges.length === 0) {
     return rewriteFullFile(client, filePath, content, config);
   }
 
   let working = content;
   let anyChange = false;
+  let rejectedRanges = 0;
 
   for (const range of ranges) {
     const { slice, startLine, endLine } = sliceWithContext(
@@ -750,28 +733,16 @@ async function rewriteByDiff(
       console.warn(
         `[bypasser] ⚠ Hunk ${startLine}-${endLine} in ${filePath} rejected — keeping original slice.`
       );
+      rejectedRanges++;
       continue;
     }
     if (newSlice.trim() !== sliceOriginal.trim()) {
-      const next = spliceSlice(working, startLine, endLine, newSlice);
-      // Invariant: `startLine`/`endLine` are derived from the ORIGINAL diff line
-      // numbers, but every splice mutates `working`. They stay correct only
-      // while the splice is line-count-neutral — which the fragment contract
-      // (fragmentLengthChanged) guarantees. If this ever fails, splicing at the
-      // next hunk's stale offset would corrupt the file; abort the whole diff
-      // rewrite and keep the original instead.
-      if (next.split("\n").length !== working.split("\n").length) {
-        console.warn(
-          `[bypasser] ⚠ Hunk ${startLine}-${endLine} in ${filePath} shifted the file — aborting diff rewrite, keeping original.`
-        );
-        return {
-          rewritten: content,
-          changed: false,
-          sanitizerWarning: true,
-          invalidReason: "truncated",
-        };
-      }
-      working = next;
+      // Ranges are processed in descending `newStart` order, so this splice only
+      // shifts content below it — already-finalized territory. Every pending
+      // range sits above and keeps its original line numbers, so `sliceWithContext`
+      // reads the correct physical lines on the next iteration. No length guard
+      // needed; the assembled file is checked as a whole below.
+      working = spliceSlice(working, startLine, endLine, newSlice);
       anyChange = true;
     }
   }
@@ -782,7 +753,8 @@ async function rewriteByDiff(
     filePath,
     config,
     anyChange,
-    TRUNCATION_LINE_RATIO
+    TRUNCATION_LINE_RATIO,
+    rejectedRanges
   );
 }
 
@@ -798,6 +770,7 @@ async function rewriteByChunksInner(
   );
   let working = content;
   let anyChange = false;
+  let rejectedChunks = 0;
 
   for (const chunk of chunks) {
     const userMessage = `File: ${filePath}\nFragment lines ${chunk.startLine}-${chunk.endLine} (inclusive):\n\n${chunk.text}`;
@@ -824,25 +797,16 @@ async function rewriteByChunksInner(
       console.warn(
         `[bypasser] ⚠ Chunk ${chunk.startLine}-${chunk.endLine} in ${filePath} rejected — keeping original.`
       );
+      rejectedChunks++;
       continue;
     }
     if (newSlice.trim() !== sliceOriginal.trim()) {
-      const next = spliceSlice(working, chunk.startLine, chunk.endLine, newSlice);
-      // Same invariant as rewriteByDiff: chunk offsets are computed once from
-      // `content`, so every splice must stay line-count-neutral or the next
-      // chunk lands at a stale offset. Abort to the original on violation.
-      if (next.split("\n").length !== working.split("\n").length) {
-        console.warn(
-          `[bypasser] ⚠ Chunk ${chunk.startLine}-${chunk.endLine} in ${filePath} shifted the file — aborting chunk rewrite, keeping original.`
-        );
-        return {
-          rewritten: content,
-          changed: false,
-          sanitizerWarning: true,
-          invalidReason: "truncated",
-        };
-      }
-      working = next;
+      // Chunks are processed in descending `startLine` order and are disjoint, so
+      // this splice only affects lines below the current chunk — content that is
+      // already finalized. Pending chunks above keep their original line numbers,
+      // so the next `working.slice(startLine - 1, endLine)` still reads the right
+      // lines. No length guard needed.
+      working = spliceSlice(working, chunk.startLine, chunk.endLine, newSlice);
       anyChange = true;
     }
   }
@@ -853,7 +817,8 @@ async function rewriteByChunksInner(
     filePath,
     config,
     anyChange,
-    CHUNK_ASSEMBLY_LINE_RATIO
+    CHUNK_ASSEMBLY_LINE_RATIO,
+    rejectedChunks
   );
 }
 
