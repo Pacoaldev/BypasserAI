@@ -1,4 +1,5 @@
 import { resolveLanguage } from "./detector.js";
+import { maskSource } from "./mask.js";
 
 const STRUCTURAL_DROP_RATIO = 0.15;
 
@@ -159,4 +160,131 @@ export function looksStructurallyBroken(
   if (beforeCount < 3) return false;
   const afterCount = countDeclarations(after, filePath);
   return afterCount < beforeCount * (1 - STRUCTURAL_DROP_RATIO);
+}
+
+// ---------------------------------------------------------------------------
+// Semantic-damage guards: docstrings turned into comments, and duplicated lint
+// pragmas. Neither is visible to a parser, so nothing above catches them.
+// ---------------------------------------------------------------------------
+
+/** A `def` / `class` header whose suite may open with a docstring. */
+const PY_SUITE_HEADER = /^(?:async[ \t]+)?(?:def|class)[ \t]+\w+.*:[ \t]*$/;
+/** Opening triple quote of a docstring, with optional string prefix. */
+const TRIPLE_QUOTE_OPENER = /^[rRbBuUfF]{0,2}("""|''')/;
+
+/**
+ * True when the resolved profile spells its docblock as a triple-quoted string
+ * literal (Python), which is what makes a docstring *executable content* rather
+ * than a comment. Read from the profile instead of hardcoding a language.
+ */
+function usesTripleQuotedDocstrings(code: string, filePath: string): boolean {
+  return /"""|'''/.test(resolveLanguage(filePath, code).docBlock.source);
+}
+
+/**
+ * Count docstrings in docstring position: the first statement of the module,
+ * or of a `class` / `def` suite. A triple-quoted string anywhere else is an
+ * ordinary string literal and must not be counted — dropping one of those is a
+ * legitimate tightening, not damage.
+ */
+/** An opening `@decorator` — may sit between a suite header and its docstring. */
+const PY_DECORATOR = /^@/;
+
+function countDocstrings(code: string): number {
+  const lines = code.split("\n");
+  let count = 0;
+  let expectDocstring = true;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (line === "" || line.startsWith("#")) continue;
+    // A suite header always opens a new docstring position, so it must be
+    // checked *before* consuming the pending one — otherwise a file opening on
+    // `def f():` + docstring reports zero docstrings and its deletion is missed.
+    if (PY_SUITE_HEADER.test(line)) {
+      expectDocstring = true;
+      continue;
+    }
+    if (!expectDocstring) continue;
+    // A decorator keeps the pending position open for the suite below it.
+    if (PY_DECORATOR.test(line)) continue;
+    const opener = TRIPLE_QUOTE_OPENER.exec(line);
+    if (opener) {
+      count += 1;
+      // Multi-line docstring: skip to its closing quote.
+      if (!line.slice(opener[0].length).includes(opener[1])) {
+        for (i += 1; i < lines.length && !lines[i].includes(opener[1]); i += 1);
+      }
+    }
+    expectDocstring = false;
+  }
+  return count;
+}
+
+/**
+ * True when `after` has fewer docstrings than `before`.
+ *
+ * A humanizer told to "comment sparingly" reads `def f():` + `"""What it
+ * does."""` as the same thing as a JSDoc block and returns `# What it does.`.
+ * In Python that is not cosmetic: the docstring *is* the function's `__doc__`,
+ * so `help()`, pydoc, Sphinx and FastAPI's generated OpenAPI schema all lose it
+ * while the file keeps parsing and every other guard stays green.
+ *
+ * Only the count matters, and a rewrite may freely reword a docstring — so this
+ * rejects deletion, never editing. Files with no docstring to lose, and
+ * languages whose docblock is already a comment (JSDoc, GoDoc, Rust `///`),
+ * are untouched: dropping those is the humanizer's actual job.
+ */
+export function looksDocstringsStripped(
+  before: string,
+  after: string,
+  filePath: string
+): boolean {
+  if (!usesTripleQuotedDocstrings(before, filePath)) return false;
+  const beforeCount = countDocstrings(before);
+  if (beforeCount === 0) return false;
+  return countDocstrings(after) < beforeCount;
+}
+
+/**
+ * A suppression pragma at the **start** of a comment's text: `pylint: disable`,
+ * `pylint: skip-file`, `ruff: noqa`, `noqa`, `flake8=`, `eslint-disable`,
+ * `@ts-ignore`, `type: ignore`, `fmt: off`.
+ *
+ * Anchored, because a comment that merely *mentions* one is prose
+ * (`# the flake8=: operator confuses people`) and must not count.
+ */
+const LINT_PRAGMA =
+  /^(?:pylint:[ \t]*(?:disable|skip-file)|ruff:[ \t]*(?:noqa|ignore)|noqa\b|flake8[:=]|eslint-disable|@ts-(?:ignore|expect-error|nocheck)|type:[ \t]*ignore|(?:fmt|format):[ \t]*(?:off|skip))/i;
+
+/**
+ * Count suppression pragmas in `code`, read from the masked **comments** view
+ * so a string literal or docstring that quotes a pragma (`msg = "use # noqa"`)
+ * never counts, and a comment marker inside a string never looks like one.
+ * Reuses `maskSource` instead of a second, weaker scanner.
+ */
+function countLintPragmas(code: string, filePath: string): number {
+  const { comments } = maskSource(code, resolveLanguage(filePath, code));
+  let count = 0;
+  for (const line of comments.split("\n")) {
+    if (LINT_PRAGMA.test(line.trim())) count += 1;
+  }
+  return count;
+}
+
+/**
+ * True when `after` carries more suppression pragmas than `before`.
+ *
+ * In a project that lints with pylint the model treats every warning it did not
+ * fix as something to silence, appending `# pylint: disable=…` instead of
+ * fixing the cause — and re-appending another copy on each commit, which is the
+ * duplicated-disables churn seen there. Suppressing a linter to look more human
+ * degrades the file; `docs/SKILL.*.md` forbids it too, and this makes it
+ * enforceable.
+ */
+export function looksLintPragmaAdded(
+  before: string,
+  after: string,
+  filePath: string
+): boolean {
+  return countLintPragmas(after, filePath) > countLintPragmas(before, filePath);
 }

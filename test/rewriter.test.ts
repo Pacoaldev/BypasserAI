@@ -545,3 +545,100 @@ test("lineCollapseOnly: a fragment collapsing to a small fraction is still flagg
   const tiny = "line 0\nline 1\nline 2\nline 3\nline 4";
   assert.equal(lineCollapseOnly(tiny, original, "stop"), true);
 });
+
+// ---------------------------------------------------------------------------
+// Regression suite for the docstring / lint-pragma damage incident.
+//
+// Observed in a project linted with pylint: the hook turned
+// `"""Return a canned response body."""` into `# Return a canned response body.`,
+// and appended a fresh `# pylint: disable=too-many-arguments` on every commit.
+// Both pass every syntax guard — the file still compiles — so the damage reached
+// the commit. These tests lock the two guards that keep the original instead.
+// ---------------------------------------------------------------------------
+
+const DOCSTRINGED_ORIGINAL = [
+  "class FakeHttp:",
+  '    """Tiny stand-in for the real HTTP client."""',
+  "",
+  "    def __init__(self, base_url: str) -> None:",
+  "        self.base_url = base_url",
+  "        self.calls: list[str] = []",
+  "",
+  "    def get(self, path: str) -> dict:",
+  '        """Return a canned response body."""',
+  "        url = self.base_url + path",
+  "        self.calls.append(url)",
+  '        return {"url": url, "status": 200}',
+  "",
+  "    def close(self) -> None:",
+  '        """Release the underlying pool."""',
+  "        self.calls.clear()",
+].join("\n");
+
+const DOCSTRINGS_AS_COMMENTS = [
+  "class FakeHttp:",
+  "    # Tiny stand-in for the real HTTP client.",
+  "",
+  "    def __init__(self, base_url: str) -> None:",
+  "        self.base_url = base_url",
+  "        self.calls: list[str] = []",
+  "",
+  "    def get(self, path: str) -> dict:",
+  "        # Return a canned response body.",
+  "        url = self.base_url + path",
+  "        self.calls.append(url)",
+  '        return {"url": url, "status": 200}',
+  "",
+  "    def close(self) -> None:",
+  "        # Release the underlying pool.",
+  "        self.calls.clear()",
+].join("\n");
+
+test("rewriteFile: rejects a rewrite that turns docstrings into comments", async () => {
+  const res = await rewriteFile("tests/fake_http.py", DOCSTRINGED_ORIGINAL, configStub, {
+    client: mockClient([DOCSTRINGS_AS_COMMENTS]),
+    scope: "file",
+  });
+  assert.equal(res.changed, false, "a rewrite that deletes docstrings must not be accepted");
+  assert.equal(res.rewritten, DOCSTRINGED_ORIGINAL);
+  assert.equal(res.invalidReason, "docstring");
+});
+
+test("rewriteFile: rejects a rewrite that adds a lint-suppression pragma", async () => {
+  const withPragma = "# pylint: disable=too-many-arguments\n" + DOCSTRINGED_ORIGINAL;
+  const res = await rewriteFile("tests/fake_http.py", DOCSTRINGED_ORIGINAL, configStub, {
+    client: mockClient([withPragma]),
+    scope: "file",
+  });
+  assert.equal(res.changed, false, "adding a suppression pragma must not be accepted");
+  assert.equal(res.rewritten, DOCSTRINGED_ORIGINAL);
+  assert.equal(res.invalidReason, "pragma");
+});
+
+test("rewriteFile: accepts a rewrite that rewords docstrings in place", async () => {
+  const reworded = [
+    "class FakeHttp:",
+    '    """Stands in for the real HTTP client."""',
+    "",
+    "    def __init__(self, base_url: str) -> None:",
+    "        self.base_url = base_url",
+    "        self.calls: list[str] = []",
+    "",
+    "    def get(self, path: str) -> dict:",
+    '        """Return the canned body for path."""',
+    "        url = self.base_url + path",
+    "        self.calls.append(url)",
+    '        return {"url": url, "status": 200}',
+    "",
+    "    def close(self) -> None:",
+    '        """Drop the recorded calls."""',
+    "        self.calls.clear()",
+  ].join("\n");
+  const res = await rewriteFile("tests/fake_http.py", DOCSTRINGED_ORIGINAL, configStub, {
+    client: mockClient([reworded]),
+    scope: "file",
+  });
+  assert.equal(res.changed, true, "rewording a docstring is legitimate tightening");
+  assert.equal(res.invalidReason, undefined);
+  assert.ok(res.rewritten.includes('"""Drop the recorded calls."""'));
+});

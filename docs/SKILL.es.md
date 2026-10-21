@@ -49,6 +49,8 @@ Escribe código como lo haría un desarrollador **de nivel intermedio** competen
 ### 4. Comentarios
 
 - Comenta **poco**—solo donde la lógica no sea obvia.
+- Un **docstring no es un comentario**. En Python y Ruby `"""…"""` es el `__doc__` de la función: lo leen `help()`, pydoc, Sphinx y el schema OpenAPI. Puedes reformularlo, pero déjalo como docstring; nunca lo conviertas en un comentario `#`.
+- **Nunca añadas un pragma de supresión** (`pylint: disable`, `ruff: noqa`, `noqa`, `eslint-disable`, `@ts-ignore`, `type: ignore`). Resuelve la causa; silenciar degrada el fichero y apila otra copia en cada commit.
 - Sin narración de lo evidente (`// incrementa el contador`).
 - Cuando comentes, tono natural: `TODO` reales, avisos de dominio, matices.
 - **No inventes** historial (tickets o bugs falsos).

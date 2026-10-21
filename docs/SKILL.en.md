@@ -49,6 +49,8 @@ Write code the way a competent **mid-level developer** would: working, readable,
 ### 4. Comments
 
 - Comment **sparingly**—only where logic is genuinely non-obvious.
+- A **docstring is not a comment**. In Python and Ruby `"""…"""` *is* the function's `__doc__`: `help()`, pydoc, Sphinx and the OpenAPI schema read it. Reword it freely, but keep it a docstring—never turn it into a `#`/`//` comment.
+- **Never add a lint-suppression pragma** (`pylint: disable`, `ruff: noqa`, `noqa`, `eslint-disable`, `@ts-ignore`, `type: ignore`). Fix the cause instead; silencing degrades the file and stacks another copy on every commit.
 - No narration of the obvious (`// increment counter`).
 - When you do comment, use a natural tone: real `TODO`s, caveats, domain quirks.
 - **Do not fabricate** history (fake tickets, fake incidents).

@@ -17,7 +17,13 @@ import {
   spliceSlice,
 } from "./diff-hunks.js";
 import { splitIntoChunks } from "./chunk-split.js";
-import { looksIndentBroken, looksStructurallyBroken, looksStubbed } from "./rewrite-validate.js";
+import {
+  looksDocstringsStripped,
+  looksIndentBroken,
+  looksLintPragmaAdded,
+  looksStructurallyBroken,
+  looksStubbed,
+} from "./rewrite-validate.js";
 import { checkSyntax } from "./syntax-guard.js";
 import { resolveLanguage } from "./detector.js";
 import { balanceRegressed } from "./bracket-balance.js";
@@ -32,7 +38,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *  - `indent`    — tokens are right but leading whitespace was flattened
  *  - `syntax`    — the assembled file does not parse under a real parser
  */
-export type InvalidReason = "truncated" | "prose" | "no-code" | "indent" | "syntax";
+export type InvalidReason =
+  | "truncated"
+  | "prose"
+  | "no-code"
+  | "indent"
+  | "syntax"
+  | "docstring"
+  | "pragma";
 
 /** Strip YAML frontmatter so only skill body reaches the model. */
 function stripSkillFrontmatter(raw: string): string {
@@ -466,6 +479,13 @@ function validateAssembledFile(
     );
     return { content: original, wasInvalid: true, reason: "syntax" };
   }
+  // The assembled file is the only place a diff/chunk rewrite can be caught
+  // losing docstrings: a fragment legitimately starts and ends mid-block.
+  const damage = checkSemanticDamage(original, assembled, filePath);
+  if (damage) {
+    console.warn(`[bypasser] ⚠ Assembled rewrite of ${filePath} ${damage.detail} — keeping original.`);
+    return { content: original, wasInvalid: true, reason: damage.reason };
+  }
   const structural = applyStructuralCheck(original, assembled, filePath, config);
   if (!structural.ok) {
     return { content: original, wasInvalid: true, reason: structural.reason };
@@ -505,6 +525,16 @@ function finalizeRewrite(
     return { content: original, wasInvalid: true, reason: "truncated" };
   }
 
+  // Semantic-damage guard: a rewrite that reads a docstring as a comment, or
+  // silences a linter it did not fix. Runs on whole-file and fragment rewrites
+  // alike (counting is whole-file by nature); the assembled file is re-checked
+  // in `validateAssembledFile`.
+  const damage = checkSemanticDamage(original, sanitized.content, filePath);
+  if (damage) {
+    console.warn(`[bypasser] ⚠ Rewrite of ${filePath} ${damage.detail} — keeping original.`);
+    return { content: original, wasInvalid: true, reason: damage.reason };
+  }
+
   // `sanitizeResponse` already ran the completeness guard with the
   // finish-reason-aware threshold. Only re-check when the caller requests a
   // *stricter* ratio than that (chunk assembly, which must not shrink more
@@ -536,6 +566,34 @@ function finalizeRewrite(
     return { content: original, wasInvalid: true, reason: structural.reason };
   }
   return sanitized;
+}
+
+/**
+ * Reject a rewrite that loses docstrings or adds lint-suppression pragmas.
+ * Both are invisible to a parser: the file keeps compiling and every
+ * syntax/bracket guard stays green while real documentation is gone.
+ *
+ * Not gated by `structuralCheck` — unlike "dropped a declaration", these are
+ * losses the file cannot recover from on its own.
+ */
+function checkSemanticDamage(
+  original: string,
+  candidate: string,
+  filePath: string
+): { reason: InvalidReason; detail: string } | null {
+  if (looksDocstringsStripped(original, candidate, filePath)) {
+    return {
+      reason: "docstring",
+      detail: "turned a docstring into a comment",
+    };
+  }
+  if (looksLintPragmaAdded(original, candidate, filePath)) {
+    return {
+      reason: "pragma",
+      detail: "added a lint-suppression pragma",
+    };
+  }
+  return null;
 }
 
 function effectiveMaxTokens(config: BypasserConfig, userMessage: string): number {
