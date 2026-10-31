@@ -487,6 +487,64 @@ test("rewriteFile (diff): a severely-collapsed fragment is still rejected", asyn
   assert.equal(res.sanitizerWarning ?? false, true, "collapse floor must flag the fragment");
 });
 
+test("rewriteFile (diff): a collapsed assembly is never rescued as a partial humanization", async () => {
+  // Incident: the pre-commit hook rewrote a `.tsx` component and committed a
+  // corrupted file (168 -> 110 lines — opening tags, parens and braces gone).
+  // The assembled-file check DID catch the collapse ("shrank below assembly
+  // ratio"), but `finishChunkOrDiffRewrite` then rescued the slices through
+  // `isSafePartialHumanization`, which re-checked bracket balance and syntax
+  // only. On TSX/JSX neither has anything to say: the bracket scanner is
+  // approximate and the syntax guard has no cheap parser for the language. A
+  // line collapse is the one signal that *is* language-agnostic, and it must
+  // never be rescued: the slices lost whole blocks, so the original wins.
+  const original = Array.from({ length: 42 }, (_, i) =>
+    i % 3 === 0 ? `export function f${i}() {` : i % 3 === 1 ? `  return ${i};` : `}`
+  ).join("\n");
+  // The model returns whole declarations, but drops most of the window: the
+  // fragment survives the 0.25 floor (>0.25 of its window) and staying
+  // bracket-balanced keeps `balanceRegressed` quiet, exactly like the incident.
+  // `structuralCheck` is off here on purpose: the real response kept every
+  // declaration and lost *content* (token and line mangling), which is the case
+  // the declaration counter cannot see.
+  const collapsed = [
+    "export function f0() {",
+    "  return 0;",
+    "}",
+    "export function f21() {",
+    "  return 21;",
+    "}",
+    "export function f24() {",
+    "  return 24;",
+    "}",
+    "export function f27() {",
+    "  return 27;",
+    "}",
+  ].join("\n");
+  // One hunk whose window (range ± contextLines) covers the whole 42-line file.
+  const diff = [
+    "diff --git a/src/x.ts b/src/x.ts",
+    "--- a/src/x.ts",
+    "+++ b/src/x.ts",
+    "@@ -21,3 +21,3 @@",
+    " export function f21() {",
+    "-  return 21;",
+    "+  return 2100;",
+    " }",
+  ].join("\n");
+  const res = await rewriteFile("src/x.ts", original, { ...configStub, structuralCheck: false }, {
+    client: mockClient([collapsed]),
+    scope: "diff",
+    diff,
+  });
+  assert.equal(
+    res.rewritten,
+    original,
+    "an assembly that collapsed below the ratio must not be rescued as partial slices"
+  );
+  assert.equal(res.rewritten.split("\n").length, 42, "no lost lines reach the commit");
+  assert.equal(res.changed, false, "a collapsed assembly leaves the file untouched");
+});
+
 test("rewriteFile (diff): hunks closer than contextLines cost one call, not two", async () => {
   // Two hunks 12 lines apart in a 60-line file. With a fixed small merge gap they
   // stay separate, their context windows overlap, and the second call re-sends

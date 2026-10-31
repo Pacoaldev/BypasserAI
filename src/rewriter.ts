@@ -422,12 +422,32 @@ function applyStructuralCheck(
  */
 const ASSEMBLY_FINISH: string = "stop";
 
+/**
+ * Whether the slices assembled so far are safe to keep when the whole-file
+ * checks failed. This is the escape hatch for a file the *heuristics* misread
+ * (a TSX component whose JSX the bracket scanner reads as unbalanced), so the
+ * partial humanization is kept instead of being thrown away.
+ *
+ * It must not rescue a rejection the caller already proved: when the assembled
+ * file collapsed below the ratio the assembly enforces (`minLineRatio`), the
+ * slices lost whole blocks — that is the silent truncation this guard chain
+ * exists to prevent, and it is *language-agnostic* evidence, which is exactly
+ * what a TSX/JS file leaves us with (the bracket scanner is approximate there
+ * and `checkSyntax` has no parser to fall back on, so both stay quiet).
+ * Incident: the hook rewrote a `.tsx` component, the assembled check rejected
+ * it for "shrank below the assembly ratio" (110 vs 168 lines), and this rescue
+ * re-accepted the corrupted slices anyway — the commit landed broken JSX.
+ */
 function isSafePartialHumanization(
   original: string,
   working: string,
-  filePath: string
+  filePath: string,
+  minLineRatio = TRUNCATION_LINE_RATIO
 ): boolean {
   if (working.trim() === original.trim()) return false;
+  const oLines = original.split("\n").length;
+  const wLines = working.split("\n").length;
+  if (oLines >= TRUNCATION_MIN_LINES && wLines < oLines * minLineRatio) return false;
   if (balanceRegressed(original, working, resolveLanguage(filePath, working))) return false;
   const syntax = checkSyntax(working, filePath);
   if (syntax.status === "invalid") return false;
@@ -656,7 +676,7 @@ function finishChunkOrDiffRewrite(
     };
   }
 
-  if (anyChange && isSafePartialHumanization(content, working, filePath)) {
+  if (anyChange && isSafePartialHumanization(content, working, filePath, minLineRatio)) {
     console.warn(
       `[bypasser] ⚠ Assembly checks failed for ${filePath} (${whole.reason ?? "invalid"}) ` +
         `but partial rewrite parses — keeping humanized slices.`
